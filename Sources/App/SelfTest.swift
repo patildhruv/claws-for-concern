@@ -112,6 +112,19 @@ enum SelfTest {
         check("context: unknown variables dropped", TerminalContext.capture(["PATH": "/bin", "HOME": "/Users/x"]).isEmpty)
         check("adapter ids unique", Set(t.adapters.map(\.id)).count == t.adapters.count)
 
+        // An unanswered permission prompt must not hold up the other terminals.
+        let prompt = DispatchSemaphore(value: 0), polled = DispatchSemaphore(value: 0)
+        t.prompter.run { prompt.wait() }
+        t.worker.run { polled.signal() }
+        check("permission prompt does not block polling", polled.wait(timeout: .now() + 1) == .success)
+        prompt.signal()
+        let fake = "io.example.claws.not-installed"
+        let first = Automation.startAsking(fake), second = Automation.startAsking(fake)
+        let whileAsking = Automation.refresh(fake)
+        Automation.doneAsking(fake)
+        check("permission: one prompt per app; no check while it is up",
+              first && !second && whileAsking == .undetermined && Automation.refresh(fake) == .notRunning)
+
         // Compiling an AppleScript reads the app's dictionary without sending it anything: no prompt.
         for (app, bundle, source) in [
             ("Ghostty", "com.mitchellh.ghostty", "tell application id \"com.mitchellh.ghostty\" to get {id, working directory, name} of every terminal"),

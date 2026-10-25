@@ -97,6 +97,9 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
   process's tty. Never prefixes: cmux puts `CMUX_SOCKET_CAPABILITY` (a token) in every shell.
 - All adapter I/O runs on `Terminals.worker`. Polling happens only for adapters with Clawds up or a
   session at work; a prompt triggers one immediate poll so Ghostty can learn the tab you typed in.
+- **Permission prompts run on `Terminals.prompter`, never the worker.** An unanswered prompt blocks its
+  thread for as long as you are away; on the worker (1.2.0) it stalled every terminal's polling and
+  clicks. A click on a terminal we may not script asks there and only activates the app this time.
 - Verified 2026-10-25, tmux 3.8, herdr 0.9.5, cmux 0.65.2:
   - **tmux**: pane from `TMUX_PANE`, server socket = first field of `TMUX`. `list-clients -F
     '#{pane_id}'` gives each client's active pane; "looking" = that client's host app is in front.

@@ -93,7 +93,10 @@ final class Terminals {
                                        ITermAdapter(), AppleTerminalAdapter()]
     /// Anything else: bring forward whichever app hosts the session.
     let fallback = HostAppAdapter()
-    let worker = ScriptThread()
+    let worker = ScriptThread(name: "claws.terminals")
+    /// Permission prompts get their own thread: one can sit unanswered for as long as you are away,
+    /// and the other terminals must keep working meanwhile.
+    let prompter = ScriptThread(name: "claws.permissions")
 
     /// Adapters with Clawds up, and adapters with a session at work (set by the tracker). Only these
     /// are polled, so an idle Mac sends no Apple Events and runs no tools at all.
@@ -177,9 +180,13 @@ final class Terminals {
     /// Jump to the session: its adapter's pane if known, else (or if that fails) the app hosting it.
     /// `done` says whether the pane itself was focused.
     func open(_ s: SessionState, adapter a: TerminalAdapter, paneID: String?, done: @escaping (_ paneOK: Bool) -> Void) {
+        // Scripting an app we may not control would raise its prompt here and hold up the worker:
+        // ask on the prompt thread instead, and this time just bring the app forward.
+        let permitted = a.scriptedBundleID.map { Automation.cached($0) == .granted } ?? true
+        if !permitted { requestPermission(a) }
         worker.run {
             var paneOK = false
-            if let paneID { paneOK = a.focus(paneID: paneID, session: s) }
+            if permitted, let paneID { paneOK = a.focus(paneID: paneID, session: s) }
             if !paneOK { _ = self.fallback.focus(paneID: "", session: s) }
             DispatchQueue.main.async { done(paneOK) }
         }
@@ -199,9 +206,10 @@ final class Terminals {
 
     /// Asks for the Automation permission an adapter needs (shows the system prompt once).
     func requestPermission(_ a: TerminalAdapter, then: (() -> Void)? = nil) {
-        guard let b = a.scriptedBundleID else { then?(); return }
-        worker.run {
+        guard let b = a.scriptedBundleID, Automation.startAsking(b) else { then?(); return }
+        prompter.run {
             _ = Automation.check(b, ask: true)
+            Automation.doneAsking(b)
             DispatchQueue.main.async { self.refreshHealth(then: then) }
         }
     }
@@ -210,10 +218,11 @@ final class Terminals {
 // MARK: - Shared plumbing
 
 /// The Automation (Apple Events) permission per target app. Checking it can block while the system
-/// prompt is up, so it only ever runs on the worker; the cache is read from anywhere.
+/// prompt is up, so it never runs on the main thread; the cache is read from anywhere.
 enum Automation {
     enum Status { case granted, denied, undetermined, notRunning }
     private static var cache: [String: Status] = [:]
+    private static var asking = Set<String>()
     private static let lock = NSLock()
 
     static func cached(_ bundleID: String) -> Status {
@@ -221,10 +230,29 @@ enum Automation {
         return cache[bundleID] ?? .undetermined
     }
 
-    @discardableResult
-    static func refresh(_ bundleID: String) -> Status { check(bundleID, ask: false) }
+    /// Marks a prompt for this app as pending; false if one already is.
+    static func startAsking(_ bundleID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return asking.insert(bundleID).inserted
+    }
 
-    /// Worker only: may block until the user answers the prompt when `ask` is true.
+    static func doneAsking(_ bundleID: String) {
+        lock.lock(); asking.remove(bundleID); lock.unlock()
+    }
+
+    static func isAsking(_ bundleID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return asking.contains(bundleID)
+    }
+
+    /// Without asking. Skipped while that app's prompt is up: the check would block the worker until
+    /// it is answered, even though it asks nothing itself.
+    @discardableResult
+    static func refresh(_ bundleID: String) -> Status {
+        isAsking(bundleID) ? cached(bundleID) : check(bundleID, ask: false)
+    }
+
+    /// Off the main thread only: blocks until the user answers the prompt when `ask` is true.
     static func check(_ bundleID: String, ask: Bool) -> Status {
         let s: Status
         if NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty {
@@ -337,13 +365,13 @@ enum HostApp {
 }
 
 /// A single long-lived thread that runs closures in order. NSAppleScript is not thread-safe, so
-/// every script runs on this one thread, never on the main thread.
+/// every script runs on one such thread (`Terminals.worker`), never on the main thread.
 final class ScriptThread {
     private var jobs: [() -> Void] = []
     private let lock = NSLock()
     private let ready = DispatchSemaphore(value: 0)
 
-    init() {
+    init(name: String) {
         let t = Thread { [unowned self] in
             while true {
                 self.ready.wait()
@@ -353,7 +381,7 @@ final class ScriptThread {
                 autoreleasepool { job?() }
             }
         }
-        t.name = "claws.terminals"
+        t.name = name
         t.qualityOfService = .userInitiated
         t.start()
     }

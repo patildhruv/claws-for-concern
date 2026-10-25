@@ -78,8 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
                                                           object: nil, queue: .main) { note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            if app?.bundleIdentifier == GhosttyAdapter.bundleID {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { AppDelegate.askGhosttyPermissionIfNeeded() }
+            guard let id = app?.bundleIdentifier,
+                  Terminals.shared.adapters.contains(where: { $0.scriptedBundleID == id }) else { return }
+            // A terminal that was not running when we checked: learn whether we may script it now.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                if id == GhosttyAdapter.bundleID { AppDelegate.askGhosttyPermissionIfNeeded() } else { Terminals.shared.refreshHealth() }
             }
         }
     }
