@@ -83,12 +83,12 @@ into tiny pixel-exact sprite sheets.
 ## How it works
 
 ```mermaid
-flowchart LR
-    CC["Claude Code sessions"] -- "hook events (async)" --> H["claws-for-concern-hook<br/>(~8 ms, never blocks Claude)"]
-    H -- "one JSON file per session" --> S[("~/Library/Application Support/<br/>Claws for Concern/sessions")]
+flowchart TB
+    CC["Claude Code sessions"] -- "hook events, async" --> H["claws-for-concern-hook (~8 ms)"]
+    H -- "one JSON file per session" --> S[("sessions folder")]
     S -- "file watcher" --> A["Claws for Concern.app"]
-    A <-- "AppleScript: focused tab, focus tab" --> G["Ghostty"]
-    A -- "claude -p --model haiku<br/>(your Claude Code login)" --> R["one-line recap"]
+    A <-- "AppleScript" --> G["Ghostty tabs"]
+    A -- "claude -p --model haiku" --> R["one-line recap"]
 ```
 
 - **Hooks**: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (for `AskUserQuestion` and `ExitPlanMode`),
