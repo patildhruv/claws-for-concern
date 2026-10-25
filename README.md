@@ -60,7 +60,8 @@ you send that session your next prompt.
 ## Arrange them your way
 
 Drag any Clawd and the whole row follows. Drop it near a corner or an edge and it snaps there;
-anywhere else, it stays exactly where you let go.
+anywhere else, it stays exactly where you let go. The whole display is yours, right down to its
+corners and the Dock's strip; only the menu bar is kept clear (or switch on *Keep clear of the Dock*).
 
 - **Every display remembers its own spot.** Move the row to the middle of your external monitor and to
   the top-right of your laptop screen; each keeps its place, and a display you have never arranged uses
@@ -145,7 +146,7 @@ app gets a Dock icon and a menu bar, like any Mac app, and drops them when you c
 | **General** | Open at login · menu bar crab and its count · what a click does · the global shortcut (record your own) · the resume command · Preview |
 | **Clawds** | Which situations get a Clawd (questions, permissions, plans, MCP input, errors, finished) · forget unseen finished ones after 1–24 h · clear on look, and after how long · how many before the +N chip · a sound (any system sound) · macOS notifications, which wait for the recap and click through to the session |
 | **Appearance** | Small, Medium or Large (always whole device pixels, so the art stays crisp) · animate · soft shadow · badges · opacity · which animation means "needs you" and "error" · which ones finished sessions pick from, with live previews · the bubble: on or off, hover delay, 11–13 pt text, 1–4 lines, which details to show, with a live preview |
-| **Position** | The display (the one you are using, the main one, or a particular one) · the default corner · snapping · lock · distance from the edge · spacing · reset every display |
+| **Position** | The display (the one you are using, the main one, or a particular one) · the default corner · snapping · keep clear of the Dock · lock · distance from the edge · spacing · reset every display |
 | **Recaps** | On or off · Claude Haiku or Sonnet · short, normal or long · your own instructions · a try-it box · which `claude` to use · clear saved recaps |
 | **Integrations** | Claude Code hooks: status, install, repair, remove · Ghostty access: status, request, open the privacy pane · the Clawd art: download again, edit the extra-art list |
 | **Advanced** | Data folder and log · reset all settings · uninstall |

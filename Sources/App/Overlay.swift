@@ -42,6 +42,15 @@ enum Placements {
     static func resetAll() { Settings.set(nil, key) }
 }
 
+extension NSScreen {
+    /// Where the Clawds may go: the whole display down to its very edges, Dock area included, but
+    /// never over the menu bar. "Keep clear of the Dock" in Settings narrows it to the visible frame.
+    var clawdArea: CGRect {
+        if Settings.avoidDock { return visibleFrame }
+        return CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: visibleFrame.maxY - frame.minY)
+    }
+}
+
 /// Pure geometry, kept free of AppKit state so the self-test can drive it.
 enum StripGeometry {
     struct Result {
@@ -285,7 +294,7 @@ final class OverlayController {
         if displayKey == nil { displayKey = Placements.displayKey(s) }
         let height = CGFloat(max(lib.maxHeight, 17)) * art + OverlayController.headroom
         let widths = order.map { items[$0]?.preferredWidth(artPt: art) ?? 0 }
-        geometry = StripGeometry.layout(widths: widths, height: height, placement: Placements.get(s), in: s.visibleFrame,
+        geometry = StripGeometry.layout(widths: widths, height: height, placement: Placements.get(s), in: s.clawdArea,
                                         margin: Settings.edgeMargin, gap: Settings.spacing)
         let target = Dictionary(uniqueKeysWithValues: zip(order, geometry.frames))
         panel.alphaValue = Settings.opacity
@@ -371,7 +380,7 @@ final class OverlayController {
         let stripRect = panel.frame
         let center = NSPoint(x: leadRect.midX, y: leadRect.midY)
         let target = NSScreen.screens.first { NSMouseInRect(center, $0.frame, false) } ?? pointerScreen
-        let place = StripGeometry.placement(lead: leadRect, strip: stripRect, in: target.visibleFrame,
+        let place = StripGeometry.placement(lead: leadRect, strip: stripRect, in: target.clawdArea,
                                             margin: Settings.edgeMargin, snap: Settings.snap)
         let key = Placements.displayKey(target)
         // Dropped on another display while pinned to one: the strip moves there.

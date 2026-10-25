@@ -329,6 +329,7 @@ struct PositionPane: View {
     @AppStorage(Settings.Key.corner) private var corner = "bottomLeft"
     @AppStorage(Settings.Key.snap) private var snap = true
     @AppStorage(Settings.Key.lockPosition) private var lock = false
+    @AppStorage(Settings.Key.avoidDock) private var avoidDock = false
     @AppStorage(Settings.Key.edgeMargin) private var margin = 8.0
     @AppStorage(Settings.Key.spacing) private var spacing = 3.0
     @State private var arranged = Placements.all.count
@@ -354,6 +355,8 @@ struct PositionPane: View {
             }
             Section {
                 Toggle("Snap to corners and edges", isOn: $snap)
+                Toggle("Keep clear of the Dock", isOn: $avoidDock)
+                    .help("Off: the Clawds can sit right in the display's corners, over the Dock's strip. The menu bar is always kept clear.")
                 Toggle("Lock position", isOn: $lock)
                 LabeledContent("Distance from the edge") {
                     Slider(value: $margin, in: 0...40, step: 1) { EmptyView() } minimumValueLabel: { Text("0") } maximumValueLabel: { Text("40") }

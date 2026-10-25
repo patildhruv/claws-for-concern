@@ -23,7 +23,7 @@ final class BubblePanel: NSPanel {
     func show(_ a: Alert, above cell: NSView, headTop: CGFloat, below: Bool, alignLeft: Bool) {
         guard let win = cell.window else { return }
         let cellRect = win.convertToScreen(cell.convert(cell.bounds, to: nil))
-        let screen = win.screen?.visibleFrame ?? NSScreen.screens[0].visibleFrame
+        let screen = (win.screen ?? NSScreen.screens[0]).clawdArea
         bubble.configure(a, below: below)
         let size = bubble.fittingSize
         let pad = BubbleView.shadowPad

@@ -90,6 +90,9 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
   `@AppStorage`, so defaults in `Settings` and in the panes must match. AppDelegate coalesces
   `UserDefaults.didChangeNotification` into one `.settingsChanged`. That notification only fires for
   changes made in this process: `defaults write` from a shell is picked up on the next relayout.
+- The Clawds may use the whole display (`NSScreen.clawdArea`): the full frame minus the menu bar, so
+  corners and the Dock's strip are allowed; `visibleFrame` stopped them above the Dock. The
+  `avoidDock` setting brings `visibleFrame` back.
 - The strip's spot is stored per display (`Placements`, keyed by the display UUID from
   `CGDisplayCreateUUIDFromDisplayID`). A spot is a corner or a fraction of the visible frame for the
   leading Clawd. `StripGeometry` (pure, self-tested) lays out cells from it and flips the growth

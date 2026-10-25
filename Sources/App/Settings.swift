@@ -23,7 +23,7 @@ enum Settings {
         static let clickAction = "clickAction", hotKey = "hotKey", hotKeyCode = "hotKeyCode", hotKeyMods = "hotKeyMods"
         static let resumeCommand = "resumeCommand", menuBarIcon = "menuBarIcon", menuBarCount = "menuBarCount"
         static let pausedUntil = "pausedUntil", didAskHooks = "didAskHooks"
-        static let lockPosition = "lockPosition", snap = "snap"
+        static let lockPosition = "lockPosition", snap = "snap", avoidDock = "avoidDock"
     }
 
     // MARK: Appearance
@@ -58,6 +58,8 @@ enum Settings {
     /// Dragging the strip is switched off.
     static var lockPosition: Bool { bool(Key.lockPosition, false) }
     static var snap: Bool { bool(Key.snap, true) }
+    /// Stay above (or beside) the Dock instead of using the display right to its edges.
+    static var avoidDock: Bool { bool(Key.avoidDock, false) }
     static var edgeMargin: CGFloat { CGFloat(double(Key.edgeMargin, 8)) }
     static var spacing: CGFloat { CGFloat(double(Key.spacing, 3)) }
     static var opacity: CGFloat { CGFloat(double(Key.opacity, 1)) }
