@@ -66,7 +66,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 /// Status that is not a preference (hooks, permissions, login item), refreshed while a pane is visible.
 final class LiveStatus: ObservableObject {
     @Published var hooks: HooksInstaller.Status = .absent
-    @Published var ghostty: Ghostty.Permission = .undetermined
+    @Published var terminals: [TerminalRow] = []
     @Published var notifications: UNAuthorizationStatus = .notDetermined
     @Published var login = false
     @Published var artCount = 0
@@ -74,6 +74,14 @@ final class LiveStatus: ObservableObject {
     @Published var mapped = 0
     @Published var unmapped = 0
     private var timer: Timer?
+    private var ticks = 0
+
+    struct TerminalRow: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let health: AdapterHealth
+        let sessions: Int
+    }
 
     init() {
         refresh()
@@ -83,8 +91,10 @@ final class LiveStatus: ObservableObject {
 
     func refresh() {
         hooks = HooksInstaller.status()
-        Ghostty.shared.refreshPermission { [weak self] p in self?.ghostty = p }
-        ghostty = Ghostty.shared.permission
+        // Adapter health runs tools (cmux socket-status…): every third refresh is plenty.
+        if ticks % 3 == 0 { Terminals.shared.refreshHealth { [weak self] in self?.fillTerminals() } }
+        ticks += 1
+        fillTerminals()
         Notifier.shared.authorization { [weak self] s in self?.notifications = s }
         login = SMAppService.mainApp.status == .enabled
         artCount = max(0, SpriteLibrary.shared.sprites.count - 1)
@@ -93,6 +103,17 @@ final class LiveStatus: ObservableObject {
             mapped = t.mappedCount
             unmapped = t.unmappedCount
         }
+    }
+
+    private func fillTerminals() {
+        let counts = AppDelegate.shared?.tracker.sessionsByTerminal() ?? [:]
+        let t = Terminals.shared
+        let rows = t.adapters.map { a in
+            TerminalRow(id: a.id, name: a.name,
+                        health: t.healthByID[a.id] ?? AdapterHealth(level: .limited, detail: "Checking…"),
+                        sessions: counts[a.id] ?? 0)
+        } + [TerminalRow(id: t.fallback.id, name: t.fallback.name, health: t.fallback.health(), sessions: counts[t.fallback.id] ?? 0)]
+        if rows != terminals { terminals = rows }
     }
 }
 
@@ -196,7 +217,7 @@ struct ClawdsPane: View {
                 }
                 .disabled(!clearOnLook)
             } header: { Text("When you look") } footer: {
-                Text("Looking means the session's Ghostty tab is in front and you are typing or moving the pointer. Needs Ghostty access (Integrations).")
+                Text("Looking means the session's tab or pane is in front and you are typing or moving the pointer. herdr decides this itself. Needs your terminal's integration (Settings → Integrations).")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Section {
@@ -474,19 +495,14 @@ struct IntegrationsPane: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             Section {
-                StatusRow(ok: live.ghostty == .granted, title: ghosttyTitle,
-                          detail: live.mapped + live.unmapped == 0 ? "Lets a Clawd find its tab, clear when you look, and jump there on click."
-                                  : "\(live.mapped) of \(live.mapped + live.unmapped) Clawds matched to a tab.")
-                HStack {
-                    if live.ghostty == .undetermined { Button("Allow Access…") { AppDelegate.askGhosttyPermission() } }
-                    if live.ghostty == .denied {
-                        Button("Open Automation Settings…") {
-                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
-                        }
-                    }
-                    Spacer()
+                ForEach(live.terminals) { row in TerminalRowView(row: row) { live.refresh() } }
+            } header: { Text("Terminals") } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Every terminal gets Clawds and recaps: they come from Claude Code itself. A terminal integration adds finding the session's pane, clearing its Clawd when you look, and jumping there on click.")
+                    Link("Yours is missing? Add it in one file →", destination: URL(string: "https://github.com/patildhruv/claws-for-concern/blob/main/docs/adapters.md")!)
                 }
-            } header: { Text("Ghostty") }
+                .font(.callout).foregroundStyle(.secondary)
+            }
             Section {
                 StatusRow(ok: live.artCount > 0, title: live.artCount > 0 ? "\(live.artCount) Clawd animations ready" : "Clawd art not downloaded yet",
                           detail: "Downloaded once from claude.ai and turned into tiny pixel-exact sprites on this Mac.")
@@ -508,15 +524,6 @@ struct IntegrationsPane: View {
         case .installed: return "Hooks installed"
         case .outdated(let why): return "Hooks need repair: \(why)"
         case .absent: return "Hooks not installed"
-        }
-    }
-
-    private var ghosttyTitle: String {
-        switch live.ghostty {
-        case .granted: return "Allowed to read and switch Ghostty tabs"
-        case .denied: return "Ghostty access denied"
-        case .undetermined: return "Ghostty access not asked yet"
-        case .notRunning: return "Ghostty is not running"
         }
     }
 
@@ -585,6 +592,66 @@ struct AboutPane: View {
 }
 
 // MARK: - Pieces
+
+/// One terminal integration: status, sessions, and the fix it needs if any.
+struct TerminalRowView: View {
+    let row: LiveStatus.TerminalRow
+    let changed: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon).foregroundStyle(color).font(.title3).frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(row.name).fontWeight(.medium)
+                    if row.sessions > 0 {
+                        Text("\(row.sessions) session\(row.sessions == 1 ? "" : "s")")
+                            .font(.caption).padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                    }
+                }
+                Text(row.health.detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let fix = row.health.fix { fixButton(fix) }
+            }
+            Spacer(minLength: 0)
+        }
+        .opacity(row.health.level == .unavailable ? 0.6 : 1)
+    }
+
+    private var icon: String {
+        switch row.health.level {
+        case .ready: return "checkmark.circle.fill"
+        case .limited: return "exclamationmark.triangle.fill"
+        case .unavailable: return "minus.circle"
+        }
+    }
+    private var color: Color {
+        switch row.health.level {
+        case .ready: return .green
+        case .limited: return .orange
+        case .unavailable: return .secondary
+        }
+    }
+
+    @ViewBuilder private func fixButton(_ fix: AdapterHealth.Fix) -> some View {
+        switch fix {
+        case .allowAutomation:
+            Button("Allow Access…") {
+                if let a = Terminals.shared.adapter(id: row.id) { Terminals.shared.requestPermission(a) { changed() } }
+            }
+        case .openAutomationSettings:
+            Button("Open Automation Settings…") {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
+            }
+        case let .openApp(bundleID, label):
+            Button(label) {
+                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                    NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+                }
+            }
+        }
+    }
+}
 
 struct StatusRow: View {
     let ok: Bool

@@ -38,7 +38,8 @@ let claude = ProcInfo.claudeAncestor(of: getppid())
 
 switch HookEvent.apply(json, to: &state, now: Date().timeIntervalSince1970,
                        pid: claude?.pid, pidStart: claude?.start, processCwd: claude.flatMap { ProcInfo.cwd($0.pid) },
-                       termProgram: env["TERM_PROGRAM"]) {
+                       termProgram: env["TERM_PROGRAM"], terminal: TerminalContext.capture(env),
+                       tty: claude.flatMap { ProcInfo.tty($0.pid) }) {
 case .write:
     do { try state?.save(to: url) } catch { log("write \(sid): \(error)") }
 case .delete:

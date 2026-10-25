@@ -45,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.overlay.update(alerts)
             self?.status.refresh()
         }
-        Ghostty.shared.start()
+        Terminals.shared.start()
         tracker.start()
         updateHotKey()
         Notifier.shared.setUp()
@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
                                                           object: nil, queue: .main) { note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            if app?.bundleIdentifier == Ghostty.bundleID {
+            if app?.bundleIdentifier == GhosttyAdapter.bundleID {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { AppDelegate.askGhosttyPermissionIfNeeded() }
             }
         }
@@ -199,12 +199,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     static func askGhosttyPermissionIfNeeded() {
-        Ghostty.shared.refreshPermission { p in
-            if p == .undetermined { Ghostty.shared.requestPermission() }
+        // Ghostty is the terminal most people here use: ask up front. iTerm2 and Terminal are asked
+        // the first time one of their sessions gets a Clawd.
+        let t = Terminals.shared
+        guard let g = t.adapter(id: "ghostty") else { return }
+        t.refreshHealth {
+            if Automation.cached(GhosttyAdapter.bundleID) == .undetermined { t.requestPermission(g) }
         }
     }
 
-    static func askGhosttyPermission() { Ghostty.shared.requestPermission() }
+    static func askGhosttyPermission() {
+        if let g = Terminals.shared.adapter(id: "ghostty") { Terminals.shared.requestPermission(g) }
+    }
 
     static func installHooksInteractively(quiet: Bool = false) {
         do {
@@ -277,6 +283,10 @@ enum CLI {
             DistributedNotificationCenter.default().postNotificationName(AppDelegate.openSettingsNote, object: rest.first,
                                                                          userInfo: nil, deliverImmediately: true)
             return 0
+        case "--terminals":
+            return Diagnostics.terminals()
+        case "--open-session":
+            return Diagnostics.open(rest.first ?? "")
         case "--displays":
             _ = NSApplication.shared
             let saved = Placements.all
@@ -301,6 +311,8 @@ enum CLI {
               --hooks-status    installed / outdated / absent
               --fetch-art       download and convert the Clawd art now
               --recap TEXT      write a one-line recap of TEXT the way the app does
+              --terminals       which terminal each live session is in, its pane, and what you are looking at
+              --open-session ID jump to a session the way a click does (ID prefix is enough)
               --displays        list displays and each one's saved spot
               --open-settings [TAB]  open the running app's Settings (general, clawds, appearance, …)
               --selftest        run the built-in checks (prints ALL PASS)

@@ -16,7 +16,7 @@ struct Alert: Equatable {
 }
 
 /// The brain. Reads the hook's session files, decides which sessions need a Clawd, learns which
-/// Ghostty tab each session lives in, and clears a Clawd once you have looked at that tab.
+/// terminal pane each session lives in, and clears a Clawd once you have looked at that pane.
 final class Tracker {
     var onChange: (([Alert]) -> Void)?
     private(set) var alerts: [Alert] = []
@@ -45,7 +45,7 @@ final class Tracker {
     private var demo: [Alert] = []
     private var recapFailures: [String: Date] = [:]
     private var demoUntil = Date.distantPast
-    private let ghostty = Ghostty.shared
+    private let terminals = Terminals.shared
     private let sprites = SpriteLibrary.shared
 
     init() {
@@ -94,20 +94,17 @@ final class Tracker {
         for sid in saved.meta.keys where fresh[sid] == nil { saved.meta[sid] = nil }
 
         let now = Date().timeIntervalSince1970
+        var capture: [String] = []
         for (sid, s) in fresh {
             var m = saved.meta[sid] ?? Meta()
             // You just typed into this session, or just started it: the focused tab is its tab.
             if let p = s.promptTs, p > m.promptSeen {
                 m.promptSeen = p
-                saved.meta[sid] = m
-                captureFocusedTab(for: sid, maxIdle: 20)
-                m = saved.meta[sid] ?? m
+                capture.append(sid)
             }
             if s.status == .idle, s.statusTs > m.startSeen {
                 m.startSeen = s.statusTs
-                saved.meta[sid] = m
-                if now - s.statusTs < 10 { captureFocusedTab(for: sid, maxIdle: 20) }
-                m = saved.meta[sid] ?? m
+                if now - s.statusTs < 10 { capture.append(sid) }
             }
             // A new alert while you are looking right at that tab never needs a Clawd.
             if alertKind(s) != nil, s.statusTs > m.ackTs, !alerts.contains(where: { $0.sessionId == sid && $0.ts == s.statusTs }),
@@ -115,6 +112,18 @@ final class Tracker {
                 m.ackTs = s.statusTs
             }
             saved.meta[sid] = m
+        }
+        // Sessions at work keep their terminal polled, so the moment one stops we know if you were looking.
+        terminals.busy = Set(fresh.values.filter { $0.status == .working || $0.status == .blocked }
+            .map { terminals.adapter(for: $0).id })
+        let learners = Set(capture.compactMap { fresh[$0] }.map { terminals.adapter(for: $0) }.filter(\.learnsPanes).map(\.id))
+        if !learners.isEmpty {
+            terminals.pollNow(learners) { [weak self] in
+                guard let self else { return }
+                for sid in capture { self.captureFocusedTab(for: sid, maxIdle: 20) }
+                self.rebuild()
+                self.save()
+            }
         }
         rebuild()
         save()
@@ -166,11 +175,14 @@ final class Tracker {
             _ = text
             list.append(Alert(sessionId: sid, kind: kind, blockedKind: s.blockedKind, ts: s.statusTs,
                               title: title(for: s), folder: (s.rootCwd as NSString).lastPathComponent,
-                              recap: recap, recapPending: pending, sprite: sprite, mapped: m.terminalId != nil))
+                              recap: recap, recapPending: pending, sprite: sprite, mapped: location(s).pane != nil))
         }
         let order: [Alert.Kind: Int] = [.blocked: 0, .failed: 1, .finished: 2]
         list.sort { (order[$0.kind]!, $0.ts) < (order[$1.kind]!, $1.ts) }
         if Date() < demoUntil { list = demo + list } else { demo = [] }
+        let watched = Set(list.compactMap { states[$0.sessionId].map { terminals.adapter(for: $0).id } })
+        terminals.watched = watched
+        askPermissionInContext(watched)
         announce(list)
         flushNotifications(list)
         if list != alerts {
@@ -270,10 +282,21 @@ final class Tracker {
         return t
     }
 
-    // MARK: Which tab is which
+    // MARK: Which terminal, which pane
 
-    /// Does terminal `t` host session `s`? `strong`: you were typing in `t` a moment ago.
-    private func matches(_ t: Ghostty.Terminal, _ s: SessionState, strong: Bool = false) -> Bool {
+    /// The session's terminal adapter and its pane, if known: recorded outright by the hook (tmux,
+    /// herdr, cmux, iTerm2, Terminal) or learned (Ghostty).
+    func location(_ s: SessionState) -> (adapter: TerminalAdapter, pane: String?) {
+        let a = terminals.adapter(for: s)
+        if let p = a.paneID(for: s) { return (a, p) }
+        return (a, a.learnsPanes ? saved.meta[s.sessionId]?.terminalId : nil)
+    }
+
+    /// The terminal a session runs in, for menus ("Open in tmux").
+    func terminalName(_ sid: String) -> String? { states[sid].map { terminals.adapter(for: $0).name } }
+
+    /// Does pane `t` host session `s`? `strong`: you were typing in `t` a moment ago.
+    private func matches(_ t: PaneInfo, _ s: SessionState, strong: Bool = false) -> Bool {
         TabMatch.matches(t, rootCwd: s.rootCwd, cwd: s.cwd, title: s.title ?? transcriptTitle(s), strong: strong)
     }
 
@@ -287,43 +310,55 @@ final class Tracker {
         saved.meta[sid] = m
     }
 
+    /// Learning adapters: you just typed into this session, so the focused pane is its pane.
     private func captureFocusedTab(for sid: String, maxIdle: Double) {
-        guard let s = states[sid], Presence.idleSeconds < maxIdle,
-              let t = ghostty.focusedTerminal(), matches(t, s, strong: true) else { return }
+        guard let s = states[sid], Presence.idleSeconds < maxIdle else { return }
+        let a = terminals.adapter(for: s)
+        guard a.learnsPanes, let t = terminals.focusedPane(a.id), matches(t, s, strong: true) else { return }
         assign(t.id, to: sid)
     }
 
-    /// For sessions that alert before we ever saw you type into them (for example, already running
-    /// when the app started): match Ghostty tabs by folder and title.
+    /// Learning adapters, for sessions that alert before we ever saw you type into them (for example,
+    /// already running when the app started): match panes by folder and title.
     private func fallbackMap(force: Bool = false, only: [SessionState]? = nil, then: (() -> Void)? = nil) {
-        let unmapped = only ?? alerts.filter { !$0.mapped }.compactMap { states[$0.sessionId] }
+        let unmapped = (only ?? alerts.filter { !$0.mapped }.compactMap { states[$0.sessionId] })
+            .filter { terminals.adapter(for: $0).learnsPanes }
         guard !unmapped.isEmpty, force || Date().timeIntervalSince(lastFallbackMap) > 5 else { then?(); return }
         lastFallbackMap = Date()
-        ghostty.allTerminals { [weak self] terminals in
-            guard let self else { return }
-            defer { then?() }
-            guard !terminals.isEmpty else { return }
-            let taken = Set(self.saved.meta.values.compactMap(\.terminalId))
-            var changed = false
-            for s in unmapped where self.saved.meta[s.sessionId]?.terminalId == nil {
-                let free = terminals.filter { !taken.contains($0.id) }
-                // Unique match wins: by title among Claude tabs anywhere, else the one Claude tab in
-                // the session's folder.
-                let fits = free.filter { self.matches($0, s) }
-                let inFolder = fits.filter { $0.cwd == s.rootCwd || $0.cwd == s.cwd }
-                if let pick = fits.count == 1 ? fits.first : (inFolder.count == 1 ? inFolder.first : nil) {
-                    self.assign(pick.id, to: s.sessionId)
-                    changed = true
+        let group = DispatchGroup()
+        var changed = false
+        for (aid, sessions) in Dictionary(grouping: unmapped, by: { terminals.adapter(for: $0).id }) {
+            guard let a = terminals.adapter(id: aid) else { continue }
+            group.enter()
+            terminals.panes(a) { [weak self] panes in
+                defer { group.leave() }
+                guard let self, !panes.isEmpty else { return }
+                let taken = Set(self.saved.meta.values.compactMap(\.terminalId))
+                for s in sessions where self.saved.meta[s.sessionId]?.terminalId == nil {
+                    let free = panes.filter { !taken.contains($0.id) }
+                    // Unique match wins: by title among Claude tabs anywhere, else the one Claude tab in
+                    // the session's folder.
+                    let fits = free.filter { self.matches($0, s) }
+                    let inFolder = fits.filter { $0.cwd == s.rootCwd || $0.cwd == s.cwd }
+                    if let pick = fits.count == 1 ? fits.first : (inFolder.count == 1 ? inFolder.first : nil) {
+                        self.assign(pick.id, to: s.sessionId)
+                        changed = true
+                    }
                 }
             }
-            if changed { self.rebuild(); self.save() }
+        }
+        group.notify(queue: .main) { [weak self] in
+            if changed { self?.rebuild(); self?.save() }
+            then?()
         }
     }
 
+    /// Are you looking at this session right now?
     private func isWatching(_ sid: String, maxIdle: Double) -> Bool {
-        guard Presence.idleSeconds < maxIdle, let tid = saved.meta[sid]?.terminalId,
-              let t = ghostty.focusedTerminal() else { return false }
-        return t.id == tid
+        guard let s = states[sid] else { return false }
+        let (a, pane) = location(s)
+        guard let pane, terminals.lookedAt(a.id).contains(pane) else { return false }
+        return a.tracksSeenItself || Presence.idleSeconds < maxIdle
     }
 
     // MARK: The 1-second loop
@@ -344,19 +379,40 @@ final class Tracker {
         if now.timeIntervalSince(lastExpiry) > 30 { lastExpiry = now; rebuild() }
 
         fallbackMap()
-        guard let t = ghostty.focusedTerminal() else { dwell.removeAll(); return }
-        // Learn the focused tab if exactly one alerting, unmapped session fits it.
-        let fits = real.filter { !$0.mapped }.compactMap { states[$0.sessionId] }.filter { matches(t, $0) }
-        if fits.count == 1, !saved.meta.values.contains(where: { $0.terminalId == t.id }) {
-            assign(t.id, to: fits[0].sessionId)
+        // Learning adapters: learn the focused pane if exactly one alerting, unmapped session fits it.
+        for a in terminals.adapters where a.learnsPanes {
+            guard let t = terminals.focusedPane(a.id) else { continue }
+            let fits = real.filter { !$0.mapped }.compactMap { states[$0.sessionId] }
+                .filter { terminals.adapter(for: $0) === a && matches(t, $0) }
+            if fits.count == 1, !saved.meta.values.contains(where: { $0.terminalId == t.id }) {
+                assign(t.id, to: fits[0].sessionId)
+            }
         }
         guard Settings.clearOnLook else { dwell.removeAll(); return }
         let active = Presence.idleSeconds < 3
-        for a in real {
-            guard saved.meta[a.sessionId]?.terminalId == t.id, active else { dwell[a.sessionId] = 0; continue }
-            dwell[a.sessionId, default: 0] += Tracker.tickInterval
+        for alert in real {
+            guard let s = states[alert.sessionId] else { continue }
+            let (a, pane) = location(s)
+            guard let pane, terminals.lookedAt(a.id).contains(pane) else { dwell[alert.sessionId] = 0; continue }
+            // herdr decides "seen" itself: trust it at once.
+            if a.tracksSeenItself { acknowledge(alert.sessionId); continue }
+            guard active else { dwell[alert.sessionId] = 0; continue }
+            dwell[alert.sessionId, default: 0] += Tracker.tickInterval
             // A short dwell, so flicking through tabs does not clear everything.
-            if dwell[a.sessionId]! >= Settings.lookSeconds { acknowledge(a.sessionId) }
+            if dwell[alert.sessionId]! >= Settings.lookSeconds { acknowledge(alert.sessionId) }
+        }
+    }
+
+    /// The first time a Clawd appears for a session in iTerm2 or Terminal (Ghostty is asked at first
+    /// launch), ask for the Automation permission that lets it find and switch that terminal's tabs.
+    private var askedPermission = Set<String>()
+
+    private func askPermissionInContext(_ adapterIDs: Set<String>) {
+        for id in adapterIDs where !askedPermission.contains(id) {
+            guard let a = terminals.adapter(id: id), let b = a.scriptedBundleID,
+                  !NSRunningApplication.runningApplications(withBundleIdentifier: b).isEmpty else { continue }
+            askedPermission.insert(id)
+            terminals.requestPermission(a)
         }
     }
 
@@ -420,25 +476,20 @@ final class Tracker {
         rebuild()
     }
 
-    /// Jump to the session's terminal tab (Ghostty), or at least bring its terminal app forward.
+    /// Jump to the session's pane through its terminal's adapter, or at least bring its app forward.
     func open(_ sid: String) {
         guard let s = states[sid] else { acknowledge(sid); return }  // demo Clawd
         acknowledge(sid)  // the Clawd goes at once; the jump follows
         let go = { [weak self] in
             guard let self else { return }
-            guard let tid = self.saved.meta[sid]?.terminalId else { TerminalApps.activate(s); return }
-            self.ghostty.focus(terminalID: tid) { ok in
-                if !ok {
-                    self.saved.meta[sid]?.terminalId = nil
-                    TerminalApps.activate(s)
-                }
+            let (a, pane) = self.location(s)
+            self.terminals.open(s, adapter: a, paneID: pane) { paneOK in
+                // A learned pane that no longer answers is forgotten (the tab was closed or reused).
+                if a.learnsPanes, pane != nil, !paneOK { self.saved.meta[sid]?.terminalId = nil }
             }
         }
-        if saved.meta[sid]?.terminalId == nil, s.termProgram == nil || s.termProgram == "ghostty" {
-            fallbackMap(force: true, only: [s], then: go)
-        } else {
-            go()
-        }
+        let (a, pane) = location(s)
+        if pane == nil, a.learnsPanes { fallbackMap(force: true, only: [s], then: go) } else { go() }
     }
 
     func state(_ sid: String) -> SessionState? { states[sid] }
@@ -478,6 +529,13 @@ final class Tracker {
         rebuild()
     }
 
+    /// Live sessions per terminal adapter, for Settings → Integrations.
+    func sessionsByTerminal() -> [String: Int] {
+        var out: [String: Int] = [:]
+        for s in states.values { out[terminals.adapter(for: s).id, default: 0] += 1 }
+        return out
+    }
+
     var mappedCount: Int { alerts.filter { $0.mapped && states[$0.sessionId] != nil }.count }
 
     var unmappedCount: Int { alerts.filter { !$0.mapped && states[$0.sessionId] != nil }.count }
@@ -490,16 +548,16 @@ final class Tracker {
     }
 }
 
-/// The rule for "this Ghostty terminal hosts that session", kept pure for the self-test.
+/// The rule for "this pane hosts that session" (learning adapters), kept pure for the self-test.
 enum TabMatch {
     /// Claude Code titles its tab "<status glyph> <session title>"; a plain shell tab has no glyph.
-    static func isClaudeTab(_ t: Ghostty.Terminal) -> Bool { t.name != t.title && !t.title.isEmpty }
+    static func isClaudeTab(_ t: PaneInfo) -> Bool { t.name != t.title && !t.title.isEmpty }
 
-    static func titleMatches(_ t: Ghostty.Terminal, _ title: String) -> Bool {
+    static func titleMatches(_ t: PaneInfo, _ title: String) -> Bool {
         t.title == title || (t.title.count > 3 && (title.hasPrefix(t.title) || t.title.hasPrefix(title)))
     }
 
-    static func matches(_ t: Ghostty.Terminal, rootCwd: String, cwd: String, title: String?, strong: Bool) -> Bool {
+    static func matches(_ t: PaneInfo, rootCwd: String, cwd: String, title: String?, strong: Bool) -> Bool {
         let folderOK = t.cwd == rootCwd || t.cwd == cwd
         if isClaudeTab(t) {
             // A Claude tab's title is the session's title, so it decides.

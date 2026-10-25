@@ -443,8 +443,8 @@ final class OverlayController {
         if item.id == OverlayController.overflowID { return overflowMenu() }
         let m = NSMenu()
         let sid = item.id
-        let mapped = alerts[sid]?.mapped ?? false
-        m.addItem(BlockItem(mapped ? "Open in Ghostty" : "Bring Terminal Forward") { [weak self] in self?.tracker.open(sid) })
+        let label = tracker.terminalName(sid).map { $0 == "Other terminals" ? "Bring Terminal Forward" : "Open in \($0)" }
+        m.addItem(BlockItem(label ?? "Open") { [weak self] in self?.tracker.open(sid) })
         m.addItem(BlockItem("Dismiss") { [weak self] in self?.tracker.acknowledge(sid) })
         if let a = alerts[sid] {
             m.addItem(BlockItem("Copy Recap") {

@@ -3,7 +3,8 @@
 Native macOS menu bar app (AppKit, no dependencies) that shows a small animated Clawd in a screen
 corner for each Claude Code session that needs you: blocked on a question, permission, plan or MCP
 input, stopped on an API error, or finished while you were in another tab. Hover for a one-line
-Claude Haiku recap, click to jump to the Ghostty tab, look at the tab and it leaves.
+Claude Haiku recap, click to jump to its tab or pane (Ghostty, cmux, herdr, tmux, iTerm2, Terminal),
+look at it and it leaves.
 
 Public repo: github.com/patildhruv/claws-for-concern (MIT). See `docs/code-map.md` for files.
 
@@ -19,6 +20,8 @@ $B --selftest               # must print ALL PASS (includes a byte-exact round t
 $B --recap "text"           # the app's recap code path, prints the line or the error
 $B --fetch-art              # download + convert the Clawd GIFs now, print sprite sizes
 $B --install-hooks | --remove-hooks | --hooks-status
+$B --terminals              # each live session: its terminal adapter, pane, "looking at it"; adapter health
+$B --open-session <id>      # the click path for one session (an ID prefix is enough)
 $B --displays               # each display's UUID and saved spot
 $B --open-settings [TAB]    # opens the running app's Settings on a tab (distributed notification)
 $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps it (needs ffmpeg)
@@ -26,7 +29,7 @@ $B --snapshot-settings DIR  # every Settings pane, offscreen (switches render "o
 ```
 
 Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse-as-library`,
-`Sources/Shared` + `Sources/App`) and the hook (`Sources/Shared` + `Sources/Hook`, Foundation only).
+`Sources/Shared` + `Sources/App/**`) and the hook (`Sources/Shared` + `Sources/Hook`, Foundation only).
 
 ## Non-negotiables
 
@@ -35,7 +38,8 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
   goes in the user's local `extra-art.txt`. The icon and menu bar crab are our own drawings (`PixelCrab`).
 - **Never block Claude Code.** Every hook but SessionEnd is `async: true`; the hook never prints and
   always exits 0. SessionEnd is sync because async hooks can be torn down while the session exits.
-- **Never block the main thread on Apple Events.** All Ghostty traffic goes through `ScriptThread`.
+- **Never block the main thread on Apple Events.** All terminal traffic (AppleScript and CLIs) goes
+  through `ScriptThread` (`Terminals.worker`).
 - **settings.json edits are byte-exact.** `OrderedJSON` keeps key order and number text and writes the
   same `JSON.stringify(v, null, 2)` format; install then remove must restore the file exactly.
 - **No personal paths or aliases in Sources.** Personal preferences live in UserDefaults
@@ -72,8 +76,9 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
   concurrently and escalates to SIGKILL. Test launches: `env -i HOME=$HOME USER=$USER open …`.
 - **AEDeterminePermissionToAutomateTarget blocks while the consent prompt is up, even with
   askUserIfNeeded false.** On the main thread it froze the app: recaps finished but their main-queue
-  callbacks never ran. Hence `ScriptThread` and the 1 s focus snapshot (`Ghostty.focusedTerminal()`).
-- **TCC keys the Automation grant to the code signature.** Ad-hoc builds ask for Ghostty access again
+  callbacks never ran. Hence `ScriptThread` and the focus snapshots in `Terminals` (`lookedAt`,
+  `focusedPane`).
+- **TCC keys the Automation grant to the code signature.** Ad-hoc builds ask for terminal access again
   after every rebuild; build with `SIGN_IDENTITY` locally. Quitting the app from a script with an
   AppleScript `quit` needs Automation for the caller, so build.sh uses `pkill -x`.
 - **NSTextField `.byTruncatingTail` disables wrapping.** The recap label uses word wrap plus
@@ -83,6 +88,31 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
 - **Pixel art must land on whole device pixels.** `OverlayController.artPoints` snaps the size to the
   screen's backing scale; layers use nearest-neighbour filtering. There is no "tiny" size for this reason.
 - Gatekeeper: releases are ad-hoc signed, not notarized; README tells users to right-click → Open.
+
+## Terminal adapters (`Sources/App/Terminals/`, guide: docs/adapters.md)
+
+- One file per terminal behind `TerminalAdapter`. `Terminals.adapters` order decides who claims a
+  session: multiplexers first, and cmux before Ghostty (cmux shells say `TERM_PROGRAM=ghostty`).
+- The hook records an **allow-list** of environment variables (`TerminalContext.keys`) plus the Claude
+  process's tty. Never prefixes: cmux puts `CMUX_SOCKET_CAPABILITY` (a token) in every shell.
+- All adapter I/O runs on `Terminals.worker`. Polling happens only for adapters with Clawds up or a
+  session at work; a prompt triggers one immediate poll so Ghostty can learn the tab you typed in.
+- Verified 2026-10-25, tmux 3.8, herdr 0.9.5, cmux 0.65.2:
+  - **tmux**: pane from `TMUX_PANE`, server socket = first field of `TMUX`. `list-clients -F
+    '#{pane_id}'` gives each client's active pane; "looking" = that client's host app is in front.
+    Jump = `switch-client -c <tty> -t <pane>` + `select-window` + `select-pane`.
+  - **herdr**: `HERDR_PANE_ID` + `HERDR_SOCKET_PATH`. `agent list` states: `done` only while the pane
+    is not visible in any attached client, `idle` once seen; with no client attached a finished agent
+    goes straight to `idle`, so "seen" is only trusted while a client (a `herdr` process with a tty)
+    runs. `agent focus <pane>` focuses and marks seen.
+  - **cmux** (`com.cmuxterm.app`): `CMUX_WORKSPACE_ID` + `CMUX_SURFACE_ID` (UUIDs, the same ones
+    `identify --json --id-format uuids` and `focus-panel --panel X --workspace Y` use). Default socket
+    mode `cmuxOnly` refuses any process not started inside cmux, even `cmux settings`; the adapter
+    then degrades to "bring cmux forward" and Settings explains the Automation mode switch. Our hooks
+    still fire under cmux's own Claude wrapper.
+  - **iTerm2 / Terminal**: matched by the session's `tty` (iTerm2 `tty of session`, Terminal `tty of
+    tab`). Both need Automation; the app asks the first time one of their sessions gets a Clawd.
+    Scripts compile against the dictionaries in `--selftest`; not exercised live (needs consent).
 
 ## Settings, placement, the Dock
 

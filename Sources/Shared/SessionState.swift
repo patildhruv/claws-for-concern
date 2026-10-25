@@ -58,13 +58,23 @@ struct SessionState: Codable, Equatable {
     /// Process start time of `claudePid`, so a reused PID is not mistaken for the session.
     var claudeStart: Double?
     var termProgram: String?
+    /// Terminal identifiers from Claude Code's environment (see TerminalContext). Adapters read these.
+    var terminal: [String: String]?
+    /// Claude Code's controlling terminal ("/dev/ttys004"): how Terminal.app and iTerm2 tabs are matched.
+    var tty: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id", cwd, rootCwd = "root_cwd", transcriptPath = "transcript_path"
         case status, statusTs = "status_ts", updatedTs = "updated_ts", promptTs = "prompt_ts"
         case blockedKind = "blocked_kind", detail, lastMessage = "last_message", title
         case permissionMode = "permission_mode", claudePid = "claude_pid", claudeStart = "claude_start"
-        case termProgram = "term_program"
+        case termProgram = "term_program", terminal, tty
+    }
+
+    /// One recorded terminal variable.
+    func env(_ key: String) -> String? {
+        guard let v = terminal?[key], !v.isEmpty else { return nil }
+        return v
     }
 
     init(sessionId: String, cwd: String) {

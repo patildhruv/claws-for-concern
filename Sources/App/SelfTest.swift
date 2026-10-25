@@ -14,6 +14,7 @@ enum SelfTest {
     static func run() -> Int32 {
         hookTransitions()
         geometry()
+        terminals()
         orderedJSON()
         installer()
         text()
@@ -73,6 +74,56 @@ enum SelfTest {
                               isAlive: { _, _ in false }) == .write && owned?.claudePid == 300 && owned?.rootCwd == "/again")
         var none: SessionState?
         check("missing session id ignored", HookEvent.apply(["hook_event_name": "Stop"], to: &none, now: 1) == .ignore && none == nil)
+    }
+
+    static func terminals() {
+        func session(_ env: [String: String], tty: String? = nil) -> SessionState {
+            var st = SessionState(sessionId: "x", cwd: "/w")
+            st.terminal = TerminalContext.capture(env)
+            st.tty = tty
+            st.termProgram = env["TERM_PROGRAM"]
+            return st
+        }
+        let t = Terminals.shared
+        let ghostty = session(["TERM_PROGRAM": "ghostty", "GHOSTTY_RESOURCES_DIR": "/Applications/Ghostty.app/Contents/Resources/ghostty"])
+        let tmuxInGhostty = session(["TERM_PROGRAM": "tmux", "GHOSTTY_RESOURCES_DIR": "/x", "TMUX": "/private/tmp/tmux-501/default,123,0", "TMUX_PANE": "%7"])
+        let cmux = session(["TERM_PROGRAM": "ghostty", "GHOSTTY_RESOURCES_DIR": "/Applications/cmux.app/x",
+                            "CMUX_WORKSPACE_ID": "WS-1", "CMUX_SURFACE_ID": "SF-2", "CMUX_SOCKET_CAPABILITY": "v1.secret",
+                            "CMUX_SOCKET_PASSWORD": "hunter2"])
+        let herdr = session(["TERM_PROGRAM": "ghostty", "HERDR_PANE_ID": "w1:p3", "HERDR_SOCKET_PATH": "/s/herdr.sock"])
+        let iterm = session(["TERM_PROGRAM": "iTerm.app", "ITERM_SESSION_ID": "w0t1p0:ABC"], tty: "/dev/ttys004")
+        let apple = session(["TERM_PROGRAM": "Apple_Terminal", "TERM_SESSION_ID": "A1"], tty: "/dev/ttys009")
+        let vscode = session(["TERM_PROGRAM": "vscode"])
+        check("terminal: Ghostty", t.adapter(for: ghostty).id == "ghostty")
+        check("terminal: tmux inside Ghostty is tmux's", t.adapter(for: tmuxInGhostty).id == "tmux")
+        check("terminal: cmux, though it says TERM_PROGRAM=ghostty", t.adapter(for: cmux).id == "cmux")
+        check("terminal: herdr", t.adapter(for: herdr).id == "herdr")
+        check("terminal: iTerm2", t.adapter(for: iterm).id == "iterm2")
+        check("terminal: Terminal.app", t.adapter(for: apple).id == "terminal")
+        check("terminal: anything else falls back to its app", t.adapter(for: vscode).id == "app")
+        check("pane: tmux socket|pane", t.adapter(for: tmuxInGhostty).paneID(for: tmuxInGhostty) == "/private/tmp/tmux-501/default|%7")
+        check("pane: cmux workspace|surface", t.adapter(for: cmux).paneID(for: cmux) == "WS-1|SF-2")
+        check("pane: herdr socket|pane", t.adapter(for: herdr).paneID(for: herdr) == "/s/herdr.sock|w1:p3")
+        check("pane: iTerm2 and Terminal by tty", t.adapter(for: iterm).paneID(for: iterm) == "/dev/ttys004"
+              && t.adapter(for: apple).paneID(for: apple) == "/dev/ttys009")
+        check("pane: Ghostty learns", t.adapter(for: ghostty).paneID(for: ghostty) == nil && t.adapter(for: ghostty).learnsPanes)
+        check("context: secrets never captured", cmux.terminal?["CMUX_SOCKET_CAPABILITY"] == nil && cmux.terminal?["CMUX_SOCKET_PASSWORD"] == nil
+              && cmux.terminal?["CMUX_SURFACE_ID"] == "SF-2")
+        check("context: unknown variables dropped", TerminalContext.capture(["PATH": "/bin", "HOME": "/Users/x"]).isEmpty)
+        check("adapter ids unique", Set(t.adapters.map(\.id)).count == t.adapters.count)
+
+        // Compiling an AppleScript reads the app's dictionary without sending it anything: no prompt.
+        for (app, bundle, source) in [
+            ("Ghostty", "com.mitchellh.ghostty", "tell application id \"com.mitchellh.ghostty\" to get {id, working directory, name} of every terminal"),
+            ("Terminal", "com.apple.Terminal", "tell application id \"com.apple.Terminal\" to get tty of selected tab of front window"),
+            ("iTerm2", "com.googlecode.iterm2", "tell application id \"com.googlecode.iterm2\" to get tty of current session of current window"),
+            ("Terminal (jump)", "com.apple.Terminal", AppleTerminalAdapter.focusScript(tty: "/dev/ttys001")),
+            ("iTerm2 (jump)", "com.googlecode.iterm2", ITermAdapter.focusScript(tty: "/dev/ttys001")),
+        ] where NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil {
+            var err: NSDictionary?
+            check("applescript compiles against \(app)'s dictionary", NSAppleScript(source: source)?.compileAndReturnError(&err) == true,
+                  String(describing: err))
+        }
     }
 
     static func geometry() {
@@ -180,11 +231,11 @@ enum SelfTest {
         check("clean caps length", Summarizer.clean(String(repeating: "a", count: 300)).count == 140)
         check("fallback first sentence", Summarizer.fallback("## Done\n\nPushed it. Then more.") == "Done Pushed it.",
               Summarizer.fallback("## Done\n\nPushed it. Then more."))
-        check("strip glyph ✳", Ghostty.stripGlyph("✳ Fix login") == "Fix login")
-        check("strip spinner", Ghostty.stripGlyph("◐ Claude animated icon") == "Claude animated icon")
-        check("keep path titles", Ghostty.stripGlyph("/Users/sam/code") == "/Users/sam/code")
-        let claudeTab = Ghostty.Terminal(id: "1", cwd: "/w", name: "✳ Fix login test")
-        let shellTab = Ghostty.Terminal(id: "2", cwd: "/w", name: "/w")
+        check("strip glyph ✳", PaneInfo.stripGlyph("✳ Fix login") == "Fix login")
+        check("strip spinner", PaneInfo.stripGlyph("◐ Claude animated icon") == "Claude animated icon")
+        check("keep path titles", PaneInfo.stripGlyph("/Users/sam/code") == "/Users/sam/code")
+        let claudeTab = PaneInfo(id: "1", cwd: "/w", name: "✳ Fix login test")
+        let shellTab = PaneInfo(id: "2", cwd: "/w", name: "/w")
         check("tab: claude tab matches its title", TabMatch.matches(claudeTab, rootCwd: "/x", cwd: "/x", title: "Fix login test", strong: false))
         check("tab: claude tab rejects another title", !TabMatch.matches(claudeTab, rootCwd: "/w", cwd: "/w", title: "Budgets", strong: true))
         check("tab: plain shell never matches a titled session", !TabMatch.matches(shellTab, rootCwd: "/w", cwd: "/w", title: "Fix login test", strong: false))

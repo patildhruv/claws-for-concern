@@ -6,8 +6,14 @@
 | `Sources/Shared/HookEvent.swift` | Pure state transitions for each hook event; describes questions, permission requests, plans and failures |
 | `Sources/Hook/main.swift` | `claws-for-concern-hook`: reads the event on stdin, flocks, applies `HookEvent`, writes or deletes the session file, exits 0 |
 | `Sources/App/App.swift` | `@main`, `AppDelegate` (launch, first-run alert, hooks/permission/art flows, hot key), `CLI` commands |
-| `Sources/App/Tracker.swift` | The model: reads session files, decides which sessions get a Clawd, learns each session's Ghostty tab, clears Clawds you have seen, recaps, demo Clawds, reaping dead sessions |
-| `Sources/App/Ghostty.swift` | AppleScript bridge on its own `ScriptThread`: permission, 1 s focused-tab snapshot, listing and focusing terminals; `TerminalApps` fallback; `Presence` (idle time) |
+| `Sources/App/Tracker.swift` | The model: reads session files, decides which sessions get a Clawd, asks the terminal adapters where each session is and what you are looking at, clears Clawds you have seen, recaps, demo Clawds, reaping dead sessions |
+| `Sources/Shared/TerminalContext.swift` | The allow-list of terminal environment variables the hook records; tty and process-list helpers |
+| `Sources/App/Terminals/Terminals.swift` | The `TerminalAdapter` protocol, the `Terminals` coordinator (registry, worker thread, polling, snapshots, open), `Automation` permissions, `Script`, `Command`, `HostApp`, `ScriptThread`, `Presence` |
+| `Sources/App/Terminals/GhosttyAdapter.swift` | Ghostty (learns panes over AppleScript) and `HostAppAdapter` (the fallback: bring the hosting app forward) |
+| `Sources/App/Terminals/MultiplexerAdapters.swift` | tmux and herdr |
+| `Sources/App/Terminals/CmuxAdapter.swift` | cmux (CLI, socket modes) |
+| `Sources/App/Terminals/AppleScriptTerminals.swift` | iTerm2 and Terminal (matched by tty) |
+| `Sources/App/Terminals/Diagnostics.swift` | `--terminals`, `--open-session` |
 | `Sources/App/Summarizer.swift` | One-line recaps via `claude -p --model haiku` (clean env, timeouts), text cleanup and fallback; `AppLog` |
 | `Sources/App/Overlay.swift` | `Placement`/`Placements` (per-display spot), `StripGeometry` (pure layout and snapping), `OverlayController` (the strip: follow-the-pointer, drag, animated relayout, overflow, hover/click/menus), `StripPanel`, `StripItem`, `ClawdCell` (sprite, badge, VoiceOver), `OverflowChip`, `BlockItem` |
 | `Sources/App/Bubble.swift` | The thought bubble panel and view: text measuring, tail, light/dark drawing |

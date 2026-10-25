@@ -20,7 +20,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" build/obj
 
 for arch in $ARCHS; do
   FLAGS=(-O -swift-version 5 -target "$arch-apple-macos14.0")
-  xcrun swiftc $FLAGS -parse-as-library Sources/Shared/*.swift Sources/App/*.swift -o "build/obj/app-$arch"
+  xcrun swiftc $FLAGS -parse-as-library Sources/Shared/*.swift Sources/App/**/*.swift -o "build/obj/app-$arch"
   xcrun swiftc $FLAGS Sources/Shared/*.swift Sources/Hook/main.swift -o "build/obj/hook-$arch"
 done
 lipo -create build/obj/app-* -output "$APP/Contents/MacOS/ClawsForConcern"

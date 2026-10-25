@@ -46,15 +46,15 @@ Each finished session keeps its own Clawd, so a row of them stays easy to tell a
 
 - **Hover**: a thought bubble with the session's title, its state and age, and a one-line recap
   written by Claude Haiku.
-- **Click**: Ghostty focuses the exact tab (and split). With other terminals, the app that hosts the
-  session comes to the front.
+- **Click**: jumps to the exact tab or pane in Ghostty, cmux, herdr, tmux, iTerm2 and Terminal.
+  Anywhere else, the app hosting the session comes to the front.
 - **Right-click**: Open, Dismiss, Copy Recap, Copy Resume Command, Dismiss All.
 - **Drag**: move the whole row anywhere (see below).
 - **⌃⌥⌘C** (or a shortcut of your own): jump to the most urgent session, from anywhere.
 - **Menu bar crab**: how many sessions need you, the list, Pause, and Settings.
 
 A Clawd never appears for a session you are already looking at. It goes away when you have actually
-seen the session (its Ghostty tab in front, and you active for a second), when you click it, or when
+seen the session (its tab or pane in front, and you active for a moment), when you click it, or when
 you send that session your next prompt.
 
 ## Arrange them your way
@@ -75,6 +75,33 @@ corners and the Dock's strip; only the menu bar is kept clear (or switch on *Kee
 - **Crowded?** Past a limit you set, extra sessions wait behind a small **+N** chip.
 - **Need quiet?** Menu bar crab → Pause Clawds, for 15 minutes up to tomorrow morning.
 
+## Works with your terminal
+
+Clawds and recaps work everywhere Claude Code runs. These terminals also get pane-level support:
+finding a session's tab or pane, clearing its Clawd when you look at it, and jumping there on click.
+
+| Terminal | How it knows the pane | When a Clawd clears |
+| --- | --- | --- |
+| **Ghostty** | learns the tab you type each prompt into, then matches by folder and title | the tab is in front and you are active |
+| **cmux** | the surface ID cmux gives every shell | the surface is focused and you are active |
+| **herdr** | the pane ID herdr gives every shell | herdr marks the agent seen (it is visible in a herdr client) |
+| **tmux** | `TMUX_PANE` | the pane is active in a tmux client whose window is in front |
+| **iTerm2** | the session's tty | the session is in front and you are active |
+| **Terminal** | the tab's tty | the tab is in front and you are active |
+| Anything else | | you prompt that session again, or dismiss it |
+
+<p align="center">
+  <img src="docs/media/settings-integrations.png" width="60%" alt="Settings, Integrations tab: Claude Code hooks installed; herdr, tmux and Ghostty ready with their session counts; cmux limited, with the steps to enable its Automation socket and an Open cmux button">
+</p>
+
+Ghostty, iTerm2 and Terminal ask once for permission to read and switch their tabs. cmux needs one
+setting for pane-level control: cmux → Settings → Automation → Socket control → **Automation**
+(otherwise a click just brings cmux forward). Settings → Integrations shows each terminal's status
+and the fix if one is needed.
+
+**Missing yours?** Supporting a terminal is one Swift file: [docs/adapters.md](docs/adapters.md) walks
+you, or your own Claude, through it.
+
 ## Install
 
 **Download.** Grab `Claws-for-Concern.zip` from the [latest release](https://github.com/patildhruv/claws-for-concern/releases/latest),
@@ -93,7 +120,8 @@ cd claws-for-concern
 
 1. **Install Hooks.** Adds a few entries to `~/.claude/settings.json`; a backup is saved next to it,
    and nothing else in the file changes. Running sessions pick them up on their own.
-2. **Allow Ghostty access** (optional). Lets the app see which tab is in front and switch tabs.
+2. **Allow access to your terminal** (optional; Ghostty asks now, iTerm2 and Terminal the first time
+   one of their sessions gets a Clawd). Lets the app see which tab is in front and switch tabs.
 3. **Open at login** (optional, ticked by default).
 
 The app then downloads the Clawd animations from claude.ai (about 1.3 MB, once) and converts them
@@ -106,16 +134,17 @@ flowchart TB
     CC["Claude Code sessions"] -- "hook events, async" --> H["claws-for-concern-hook (~8 ms)"]
     H -- "one JSON file per session" --> S[("sessions folder")]
     S -- "file watcher" --> A["Claws for Concern.app"]
-    A <-- "AppleScript" --> G["Ghostty tabs"]
+    A <-- "terminal adapters" --> G["Ghostty · cmux · herdr · tmux · iTerm2 · Terminal"]
     A -- "claude -p --model haiku" --> R["one-line recap"]
 ```
 
 - **Hooks**: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (for `AskUserQuestion` and `ExitPlanMode`),
   `PermissionRequest`, `Notification` (permission and input prompts), `PostToolUse`, `PostToolUseFailure`,
   `Stop`, `StopFailure` and `SessionEnd`. All but `SessionEnd` run asynchronously, so Claude never waits.
-- **Which tab is which**: the app remembers the tab you were typing in when you sent each prompt. For
-  sessions it has not seen you type into yet, it matches the folder and the session title Claude Code
-  shows in the tab.
+- **Which pane is which**: the hook records the terminal's own IDs for the session (`TMUX_PANE`, the
+  cmux surface, the herdr pane, the tty) from an allow-list, never anything secret. Ghostty has no such
+  ID, so the app remembers the tab you were typing in when you sent each prompt, and otherwise matches
+  the folder and the session title Claude Code shows in the tab.
 - **Recaps**: `claude -p --model haiku` through the Claude Code install and login already on your Mac,
   so there is no API key. About 650 input and 25 output tokens per recap, three seconds, no tools, no MCP
   servers, nothing saved to your session history, and your own settings and hooks are not loaded.
@@ -148,7 +177,7 @@ app gets a Dock icon and a menu bar, like any Mac app, and drops them when you c
 | **Appearance** | Small, Medium or Large (always whole device pixels, so the art stays crisp) · animate · soft shadow · badges · opacity · which animation means "needs you" and "error" · which ones finished sessions pick from, with live previews · the bubble: on or off, hover delay, 11–13 pt text, 1–4 lines, which details to show, with a live preview |
 | **Position** | The display (the one you are using, the main one, or a particular one) · the default corner · snapping · keep clear of the Dock · lock · distance from the edge · spacing · reset every display |
 | **Recaps** | On or off · Claude Haiku or Sonnet · short, normal or long · your own instructions · a try-it box · which `claude` to use · clear saved recaps |
-| **Integrations** | Claude Code hooks: status, install, repair, remove · Ghostty access: status, request, open the privacy pane · the Clawd art: download again, edit the extra-art list |
+| **Integrations** | Claude Code hooks: status, install, repair, remove · every terminal: status, sessions, and the fix it needs (permission, cmux's socket mode) · the Clawd art: download again, edit the extra-art list |
 | **Advanced** | Data folder and log · reset all settings · uninstall |
 
 For scripts, everything lives in the `io.github.patildhruv.claws-for-concern` defaults domain, and the
@@ -158,9 +187,7 @@ app has a small command line (`ClawsForConcern --help`).
 
 - macOS 14 Sonoma or later
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) (the native installer or Homebrew)
-- [Ghostty](https://ghostty.org) 1.3 or later for the tab-aware parts. With any other terminal the Clawds
-  still appear; clicking brings that terminal forward, and a Clawd clears when you dismiss it or prompt
-  that session again.
+- Any terminal. Pane-level support in Ghostty 1.3+, cmux, herdr, tmux, iTerm2 and Terminal (see above).
 
 ## Uninstall
 
@@ -177,8 +204,9 @@ defaults delete io.github.patildhruv.claws-for-concern
 - **No Clawds at all.** Settings → Integrations should say *Hooks installed*. Then send any session a
   prompt and switch to another app before it finishes. **Preview the Clawds** shows what to expect, and
   check you have not paused them (the menu bar crab greys out).
-- **A Clawd will not go away when I look at its tab.** Allow Ghostty access (Settings → Integrations). If
-  it says some Clawds are not matched to a tab, send that session one prompt and the app will learn its tab.
+- **A Clawd will not go away when I look at its tab.** Settings → Integrations shows your terminal's
+  status and what it needs. In Ghostty, a session the app has not matched yet learns its tab from your
+  next prompt. `ClawsForConcern --terminals` shows what the app sees for every session.
 - **Recaps never arrive.** Run
   `"/Applications/Claws for Concern.app/Contents/MacOS/ClawsForConcern" --recap "test"`: it uses the same
   code path and prints the error. Settings → Recaps → Try it does the same.
@@ -191,12 +219,14 @@ defaults delete io.github.patildhruv.claws-for-concern
 ./build.sh --no-install                 # build into build/
 B="build/Claws for Concern.app/Contents/MacOS/ClawsForConcern"
 "$B" --selftest                         # unit checks; prints ALL PASS
+"$B" --terminals                        # what the terminal adapters see, per session
 "$B" --help                             # the other commands
 tools/make-readme-media.sh              # re-render the images in this README
 ```
 
-Plain `swiftc`, no Xcode project and no dependencies. [`docs/code-map.md`](docs/code-map.md) says which file
-does what, and [`CLAUDE.md`](CLAUDE.md) lists the traps found while building it.
+Plain `swiftc`, no Xcode project and no dependencies. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules,
+[`docs/adapters.md`](docs/adapters.md) how to add a terminal, [`docs/code-map.md`](docs/code-map.md) which file
+does what, and [`CLAUDE.md`](CLAUDE.md) the traps found while building it.
 
 ## Credits
 
