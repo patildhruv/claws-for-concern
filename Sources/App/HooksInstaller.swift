@@ -40,6 +40,28 @@ enum HooksInstaller {
 
     enum Status: Equatable { case installed, outdated(String), absent }
 
+    /// Hook binaries our entries currently point at.
+    static func referencedHookPaths(settings url: URL = settingsURL) -> Set<String> {
+        guard let text = try? String(contentsOf: url, encoding: .utf8), let root = try? JSONValue.parse(text),
+              case let .object(events) = root["hooks"] ?? .null else { return [] }
+        var out = Set<String>()
+        for (_, groups) in events {
+            for g in groups.arrayValue ?? [] {
+                for h in g["hooks"]?.arrayValue ?? [] {
+                    guard let c = h["command"]?.stringValue, c.contains(marker) else { continue }
+                    out.insert(c.trimmingCharacters(in: CharacterSet(charactersIn: "\" ")))
+                }
+            }
+        }
+        return out
+    }
+
+    /// True when our hooks point at a copy of the app that no longer exists (moved or deleted).
+    static var pointsAtMissingCopy: Bool {
+        let paths = referencedHookPaths()
+        return !paths.isEmpty && paths.contains { !FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
     static func status(settings url: URL = settingsURL, hookPath: String = hookPath) -> Status {
         guard let text = try? String(contentsOf: url, encoding: .utf8),
               let root = try? JSONValue.parse(text) else { return .absent }

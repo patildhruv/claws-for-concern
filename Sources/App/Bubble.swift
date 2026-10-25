@@ -19,16 +19,18 @@ final class BubblePanel: NSPanel {
     override var canBecomeKey: Bool { false }
 
     /// `headTop`: height of the Clawd's head above the bottom of its cell, so the tail points at it.
-    func show(_ a: Alert, above cell: NSView, headTop: CGFloat, corner: Settings.Corner) {
+    /// `below`: open under the strip (it sits high on the screen). `alignLeft`: extend rightwards.
+    func show(_ a: Alert, above cell: NSView, headTop: CGFloat, below: Bool, alignLeft: Bool) {
         guard let win = cell.window else { return }
         let cellRect = win.convertToScreen(cell.convert(cell.bounds, to: nil))
         let screen = win.screen?.visibleFrame ?? NSScreen.screens[0].visibleFrame
-        bubble.configure(a, below: !corner.isBottom)
+        bubble.configure(a, below: below)
         let size = bubble.fittingSize
         let pad = BubbleView.shadowPad
-        var x: CGFloat = corner.isLeft ? cellRect.minX - 6 - pad : cellRect.maxX + 6 + pad - size.width
+        var x: CGFloat = alignLeft ? cellRect.minX - 6 - pad : cellRect.maxX + 6 + pad - size.width
         x = min(max(x, screen.minX - pad + 2), screen.maxX + pad - 2 - size.width)
-        let y: CGFloat = corner.isBottom ? cellRect.minY + headTop + 2 - pad : cellRect.minY - size.height + pad - 2
+        var y: CGFloat = below ? cellRect.minY - size.height + pad - 2 : cellRect.minY + headTop + 2 - pad
+        y = min(max(y, screen.minY - pad), screen.maxY + pad - size.height)
         let frame = NSRect(x: x.rounded(), y: y.rounded(), width: size.width, height: size.height)
         // Tail points at the Clawd's head.
         bubble.anchorX = cellRect.midX - frame.minX
@@ -90,9 +92,18 @@ final class BubbleView: NSView {
 
     func configure(_ a: Alert, below: Bool) {
         self.below = below
-        titleLabel.stringValue = "\(a.title)  ·  \(BubbleView.stateWord(a))  ·  \(BubbleView.age(a.ts))"
+        var parts: [String] = []
+        if Settings.bubbleTitle { parts.append(a.title) }
+        if Settings.bubbleState { parts.append(BubbleView.stateWord(a)) }
+        if Settings.bubbleAge { parts.append(BubbleView.age(a.ts)) }
+        titleLabel.stringValue = parts.joined(separator: "  ·  ")
+        titleLabel.isHidden = parts.isEmpty
         recapLabel.stringValue = a.recap
         recapLabel.textColor = a.recapPending ? .secondaryLabelColor : .labelColor
+        let size = Settings.bubbleTextSize
+        recapLabel.font = .systemFont(ofSize: size)
+        titleLabel.font = .systemFont(ofSize: max(10, size - 1), weight: .semibold)
+        recapLabel.maximumNumberOfLines = Settings.bubbleLines
         layoutLabels()
     }
 
@@ -130,15 +141,16 @@ final class BubbleView: NSView {
             let line = ceil(font.ascender - font.descender + font.leading)
             return NSSize(width: ceil(r.width) + 2, height: min(ceil(r.height), line * CGFloat(maxLines)))
         }
-        let title = measure(titleLabel, width: 10_000, maxLines: 1)
+        let lines = Settings.bubbleLines
+        let title = titleLabel.isHidden ? .zero : measure(titleLabel, width: 10_000, maxLines: 1)
         let recapOneLine = measure(recapLabel, width: 10_000, maxLines: 1)
         // Hug the text: as wide as the longest wrapped line, not the wrap limit.
-        let wrapped = measure(recapLabel, width: BubbleView.maxText, maxLines: 3)
-        textWidth = min(BubbleView.maxText, max(title.width, min(recapOneLine.width, wrapped.width), 140))
-        let rh = measure(recapLabel, width: textWidth, maxLines: 3).height
+        let wrapped = measure(recapLabel, width: BubbleView.maxText, maxLines: lines)
+        textWidth = min(BubbleView.maxText, max(title.width, min(recapOneLine.width, wrapped.width), 120))
+        let rh = measure(recapLabel, width: textWidth, maxLines: lines).height
         let th = title.height
         recapLabel.preferredMaxLayoutWidth = textWidth
-        bubbleHeight = (8 + th + 3 + rh + 9).rounded(.up)
+        bubbleHeight = (8 + th + (th > 0 ? 3 : 0) + rh + 9).rounded(.up)
         let p = BubbleView.shadowPad
         let base = below ? p : p + BubbleView.tail
         recapLabel.frame = NSRect(x: p + 12, y: base + 9, width: textWidth + 2, height: rh)

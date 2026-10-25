@@ -13,6 +13,7 @@ enum SelfTest {
 
     static func run() -> Int32 {
         hookTransitions()
+        geometry()
         orderedJSON()
         installer()
         text()
@@ -57,8 +58,56 @@ enum SelfTest {
         check("older event dropped", HookEvent.apply(ev("UserPromptSubmit"), to: &stale, now: 5) == .ignore && stale?.status == .failed)
         check("compact keeps status", apply(ev("SessionStart", ["source": "compact"])) != .write || s?.status == .failed)
         check("session end deletes", apply(ev("SessionEnd", ["reason": "other"])) == .delete)
+        // Ownership: a child `claude` that inherited the session ID must not touch the session.
+        var owned: SessionState?
+        _ = HookEvent.apply(ev("SessionStart", ["source": "startup", "cwd": "/drifted"]), to: &owned, now: 1, pid: 100,
+                            pidStart: 5, processCwd: "/launch", isAlive: { _, _ in true })
+        check("root folder comes from the process", owned?.rootCwd == "/launch" && owned?.cwd == "/drifted")
+        check("child Stop ignored while owner lives",
+              HookEvent.apply(ev("Stop", ["last_assistant_message": "x"]), to: &owned, now: 2, pid: 200,
+                              isAlive: { _, _ in true }) == .ignore && owned?.status == .idle)
+        check("child SessionEnd ignored", HookEvent.apply(ev("SessionEnd"), to: &owned, now: 3, pid: 200,
+                                                          isAlive: { _, _ in true }) == .ignore)
+        check("resume in a new process takes over",
+              HookEvent.apply(ev("UserPromptSubmit"), to: &owned, now: 4, pid: 300, processCwd: "/again",
+                              isAlive: { _, _ in false }) == .write && owned?.claudePid == 300 && owned?.rootCwd == "/again")
         var none: SessionState?
         check("missing session id ignored", HookEvent.apply(["hook_event_name": "Stop"], to: &none, now: 1) == .ignore && none == nil)
+    }
+
+    static func geometry() {
+        let vf = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let w: [CGFloat] = [28, 28, 28]
+        func lay(_ p: Placement) -> StripGeometry.Result {
+            StripGeometry.layout(widths: w, height: 40, placement: p, in: vf, margin: 8, gap: 3)
+        }
+        let bl = lay(Placement(corner: "bottomLeft"))
+        check("layout: bottom-left grows right", bl.growsRight && bl.frames.map(\.minX) == [8, 39, 70] && bl.frames[0].minY == 8)
+        let br = lay(Placement(corner: "bottomRight"))
+        check("layout: bottom-right grows left", !br.growsRight && br.frames.map(\.minX) == [964, 933, 902], "\(br.frames.map(\.minX))")
+        let nearRight = lay(Placement(corner: nil, fx: 0.96, fy: 0.5))
+        check("layout: no room on the right flips left, first Clawd stays put",
+              !nearRight.growsRight && nearRight.frames[0].minX == 960 && nearRight.frames[2].minX < 960)
+        let middle = lay(Placement(corner: nil, fx: 0.5, fy: 0.5))
+        check("layout: middle grows right", middle.growsRight && middle.frames[0].minX == 500)
+        let top = lay(Placement(corner: "topLeft"))
+        check("layout: top corner opens the bubble below", top.bubbleBelow && top.frames[0].maxY == 792)
+        let offscreen = lay(Placement(corner: nil, fx: 1.4, fy: -0.2))
+        check("layout: a stale spot is pulled back on screen", offscreen.rect.maxX <= 1000 && offscreen.rect.minY >= 0)
+
+        func drop(_ x: CGFloat, _ y: CGFloat) -> Placement {
+            let lead = CGRect(x: x, y: y, width: 28, height: 40)
+            return StripGeometry.placement(lead: lead, strip: CGRect(x: x, y: y, width: 90, height: 40), in: vf, margin: 8, snap: true)
+        }
+        check("snap: near bottom-left becomes the corner", drop(30, 25).corner == "bottomLeft")
+        check("snap: near top-right becomes the corner", drop(1000 - 8 - 90 - 20, 800 - 8 - 40 - 10).corner == "topRight")
+        let free = drop(400, 300)
+        check("snap: middle stays exactly where dropped", free.corner == nil && free.fx == 0.4 && free.fy == 0.375)
+        let edge = drop(400, 15)
+        check("snap: close to the bottom edge sits on it", edge.corner == nil && abs(edge.fy * 800 - 8) < 0.001)
+        let noSnap = StripGeometry.placement(lead: CGRect(x: 30, y: 25, width: 28, height: 40),
+                                             strip: CGRect(x: 30, y: 25, width: 90, height: 40), in: vf, margin: 8, snap: false)
+        check("snap off: exact drop", noSnap.corner == nil && noSnap.fx == 0.03)
     }
 
     static func orderedJSON() {

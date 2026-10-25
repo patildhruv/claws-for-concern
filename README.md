@@ -49,12 +49,30 @@ Each finished session keeps its own Clawd, so a row of them stays easy to tell a
 - **Click**: Ghostty focuses the exact tab (and split). With other terminals, the app that hosts the
   session comes to the front.
 - **Right-click**: Open, Dismiss, Copy Recap, Copy Resume Command, Dismiss All.
-- **⌃⌥⌘C**: jump to the most urgent session, from anywhere.
-- **Menu bar crab**: how many sessions need you, and every setting.
+- **Drag**: move the whole row anywhere (see below).
+- **⌃⌥⌘C** (or a shortcut of your own): jump to the most urgent session, from anywhere.
+- **Menu bar crab**: how many sessions need you, the list, Pause, and Settings.
 
 A Clawd never appears for a session you are already looking at. It goes away when you have actually
 seen the session (its Ghostty tab in front, and you active for a second), when you click it, or when
 you send that session your next prompt.
+
+## Arrange them your way
+
+Drag any Clawd and the whole row follows. Drop it near a corner or an edge and it snaps there;
+anywhere else, it stays exactly where you let go.
+
+- **Every display remembers its own spot.** Move the row to the middle of your external monitor and to
+  the top-right of your laptop screen; each keeps its place, and a display you have never arranged uses
+  the default corner.
+- **They come with you.** By default the row moves to the display you are using (after a moment, so
+  passing the pointer across does not drag it along). You can also pin it to the main display or any
+  particular one.
+- **They never fall off the edge.** The most urgent Clawd stays exactly where you put it. The rest line
+  up to its right, and when there is no room on the right they flip to the left on their own. Near the
+  top of the screen, the bubble opens below instead.
+- **Crowded?** Past a limit you set, extra sessions wait behind a small **+N** chip.
+- **Need quiet?** Menu bar crab → Pause Clawds, for 15 minutes up to tomorrow morning.
 
 ## Install
 
@@ -106,30 +124,34 @@ flowchart TB
 
 Everything stays on your Mac except the recap request: Claude's final message of a turn (up to
 12,000 characters) goes to Anthropic through your own Claude Code login, the same way every Claude
-Code request does. Turn recaps off in the menu and the bubble shows the first sentence instead.
+Code request does. Turn recaps off in Settings → Recaps and the bubble shows the first sentence instead.
 
 The app reads only what the hooks record, plus the title records in each session's transcript. It never
 reads your code or your terminal. Its files live in `~/Library/Application Support/Claws for Concern/`.
 
 ## Settings
 
-Everything is in the menu bar crab:
+Menu bar crab → **Settings…** (⌘,), or open the app again from Applications. While Settings is open the
+app gets a Dock icon and a menu bar, like any Mac app, and drops them when you close it.
 
-- **Show**: sessions that need you, finished ones, errors; forget unseen finished sessions after 1–24 hours.
-- **Size and Position**: Small, Medium or Large (always whole device pixels, so the art stays crisp);
-  any corner; the main display or the one with your pointer.
-- **One-Line Recaps by Claude Haiku**, **Preview the Clawds**, and under **Setup**: hooks, Ghostty
-  access, the keyboard shortcut, Open at Login.
+<p align="center">
+  <img src="docs/media/settings-clawds.png" width="32%" alt="Settings, Clawds tab: which sessions get a Clawd, clearing on look, crowd control, sound and notifications">
+  <img src="docs/media/settings-appearance.png" width="32%" alt="Settings, Appearance tab: size with a live preview, animate, shadow, badges, opacity, and which animations to use">
+  <img src="docs/media/settings-position.png" width="32%" alt="Settings, Position tab: which display, the default corner, snapping, lock, distance from the edge and spacing">
+</p>
 
-Two extras for the command line:
+| Tab | What you can change |
+| --- | --- |
+| **General** | Open at login · menu bar crab and its count · what a click does · the global shortcut (record your own) · the resume command · Preview |
+| **Clawds** | Which situations get a Clawd (questions, permissions, plans, MCP input, errors, finished) · forget unseen finished ones after 1–24 h · clear on look, and after how long · how many before the +N chip · a sound (any system sound) · macOS notifications, which wait for the recap and click through to the session |
+| **Appearance** | Small, Medium or Large (always whole device pixels, so the art stays crisp) · animate · soft shadow · badges · opacity · which animation means "needs you" and "error" · which ones finished sessions pick from, with live previews · the bubble: on or off, hover delay, 11–13 pt text, 1–4 lines, which details to show, with a live preview |
+| **Position** | The display (the one you are using, the main one, or a particular one) · the default corner · snapping · lock · distance from the edge · spacing · reset every display |
+| **Recaps** | On or off · Claude Haiku or Sonnet · short, normal or long · your own instructions · a try-it box · which `claude` to use · clear saved recaps |
+| **Integrations** | Claude Code hooks: status, install, repair, remove · Ghostty access: status, request, open the privacy pane · the Clawd art: download again, edit the extra-art list |
+| **Advanced** | Data folder and log · reset all settings · uninstall |
 
-```sh
-# What "Copy Resume Command" copies ({id} is the session ID):
-defaults write io.github.patildhruv.claws-for-concern resumeCommand -string "claude --resume {id}"
-
-# More official Clawd GIFs for finished sessions, one claude.ai URL per line:
-open -e ~/Library/Application\ Support/Claws\ for\ Concern/extra-art.txt
-```
+For scripts, everything lives in the `io.github.patildhruv.claws-for-concern` defaults domain, and the
+app has a small command line (`ClawsForConcern --help`).
 
 ## Requirements
 
@@ -141,7 +163,8 @@ open -e ~/Library/Application\ Support/Claws\ for\ Concern/extra-art.txt
 
 ## Uninstall
 
-Menu bar crab → Setup → **Remove Hooks…**, then quit and delete the app. To remove every trace:
+Settings → Advanced → **Uninstall…** removes the hooks and quits; then drag the app to the Trash. To remove
+every trace:
 
 ```sh
 rm -rf ~/Library/Application\ Support/Claws\ for\ Concern
@@ -150,14 +173,16 @@ defaults delete io.github.patildhruv.claws-for-concern
 
 ## Troubleshooting
 
-- **No Clawds at all.** Menu → Setup should say *Claude Code hooks: installed*. Then send any session a
-  prompt and switch to another app before it finishes. **Preview the Clawds** shows what to expect.
-- **A Clawd will not go away when I look at its tab.** Allow Ghostty access (Menu → Setup). If Setup says
-  some Clawds are *not yet matched to a tab*, send that session one prompt and the app will learn its tab.
+- **No Clawds at all.** Settings → Integrations should say *Hooks installed*. Then send any session a
+  prompt and switch to another app before it finishes. **Preview the Clawds** shows what to expect, and
+  check you have not paused them (the menu bar crab greys out).
+- **A Clawd will not go away when I look at its tab.** Allow Ghostty access (Settings → Integrations). If
+  it says some Clawds are not matched to a tab, send that session one prompt and the app will learn its tab.
 - **Recaps never arrive.** Run
   `"/Applications/Claws for Concern.app/Contents/MacOS/ClawsForConcern" --recap "test"`: it uses the same
-  code path and prints the error. Recent errors also appear in Menu → Setup.
-- **⌃⌥⌘C does nothing.** Another app has that shortcut; the log (Menu → Setup → Show Log) says so.
+  code path and prints the error. Settings → Recaps → Try it does the same.
+- **The shortcut does nothing.** Another app has it; the log (Settings → Advanced → Log) says so. Record a
+  different one in Settings → General.
 
 ## Development
 

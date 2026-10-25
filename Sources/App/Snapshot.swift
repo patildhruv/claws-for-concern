@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// `--snapshot DIR`: renders the README images offscreen (no screen recording needed).
 ///   hero-light.png / hero-dark.png  a desktop corner with the Clawds and a thought bubble
@@ -25,6 +26,31 @@ enum Snapshot {
               "Comparison table done; recommends Business Premium for field staff", "Dancing"),
             a("5", .finished, nil, 1500, "Release notes 2.4", "Draft ready in docs/release-2.4.md, waiting for your edits", "RacingCar"),
         ]
+    }
+
+    /// Renders each Settings pane to DIR/settings-<id>.png (light) for review and the README.
+    static func settings(outDir: String) -> Int32 {
+        _ = NSApplication.shared
+        let dir = URL(fileURLWithPath: outDir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for dark in [false, true] {
+            for t in SettingsWindowController.tabs {
+                let size = SettingsWindowController.size
+                let host = NSHostingView(rootView: t.view.frame(width: size.width, height: size.height))
+                host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                host.frame = NSRect(origin: .zero, size: size)
+                let win = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                win.appearance = host.appearance
+                win.contentView = host
+                host.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+                guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
+                host.cacheDisplay(in: host.bounds, to: rep)
+                if let img = rep.cgImage { write(img, dir.appendingPathComponent("settings-\(t.id)\(dark ? "-dark" : "").png")) }
+            }
+        }
+        print("wrote \(dir.path)")
+        return 0
     }
 
     static func run(outDir: String) -> Int32 {
@@ -98,7 +124,7 @@ enum Snapshot {
         for a in alerts {
             let w = CGFloat(SpriteLibrary.shared[a.sprite]?.width ?? 24) * art + 4
             out.append(Item(alert: a, x: x))
-            x += w + OverlayController.gap
+            x += w + Settings.spacing
         }
         return out.map { Item(alert: $0.alert, x: $0.x) }
     }

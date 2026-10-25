@@ -127,6 +127,18 @@ enum ProcInfo {
         return nil
     }
 
+    /// The process's own working directory: where `claude` was launched, which is also what
+    /// Ghostty reports for the tab. The hook's `cwd` field drifts as Claude's Bash `cd`s around.
+    static func cwd(_ pid: Int32) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        let path = withUnsafeBytes(of: &info.pvi_cdir.vip_path) { raw in
+            String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+        }
+        return path.isEmpty ? nil : path
+    }
+
     /// True when `pid` is alive and is still the process that started at `start`.
     static func isAlive(pid: Int32, start: Double?) -> Bool {
         guard let e = info(pid) else { return false }

@@ -41,7 +41,6 @@ final class Tracker {
     private var watcher: DispatchSourceFileSystemObject?
     private var reloadPending = false
     private var timer: Timer?
-    private var ticks = 0
     private var lastFallbackMap = Date.distantPast
     private var demo: [Alert] = []
     private var recapFailures: [String: Date] = [:]
@@ -70,8 +69,8 @@ final class Tracker {
             self?.rebuild()
         }
         reload()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
-        timer?.tolerance = 0.2
+        timer = Timer.scheduledTimer(withTimeInterval: Tracker.tickInterval, repeats: true) { [weak self] _ in self?.tick() }
+        timer?.tolerance = 0.1
     }
 
     private func scheduleReload() {
@@ -123,7 +122,15 @@ final class Tracker {
 
     private func alertKind(_ s: SessionState) -> Alert.Kind? {
         switch s.status {
-        case .blocked: return Settings.showBlocked ? .blocked : nil
+        case .blocked:
+            let on: Bool
+            switch s.blockedKind {
+            case "question": on = Settings.showQuestions
+            case "permission": on = Settings.showPermissions
+            case "plan": on = Settings.showPlans
+            default: on = Settings.showInput
+            }
+            return on ? .blocked : nil
         case .failed: return Settings.showFailed ? .failed : nil
         case .finished:
             guard Settings.showFinished else { return nil }
@@ -144,10 +151,11 @@ final class Tracker {
             var m = saved.meta[sid] ?? Meta()
             let sprite: String
             switch kind {
-            case .blocked: sprite = SpriteLibrary.blocked
-            case .failed: sprite = SpriteLibrary.failed
+            case .blocked: sprite = Settings.blockedSprite
+            case .failed: sprite = Settings.failedSprite
             case .finished:
-                if let sp = m.sprite, sprites.sprites[sp] != nil, sp != SpriteLibrary.placeholder { sprite = sp } else {
+                if let sp = m.sprite, sprites.sprites[sp] != nil, sp != SpriteLibrary.placeholder,
+                   sprites.finishedPool.contains(sp) { sprite = sp } else {
                     sprite = sprites.finishedSprite(for: sid, avoiding: used)
                     // Never pin the stand-in: real art may arrive a few seconds later.
                     if sprite != SpriteLibrary.placeholder { m.sprite = sprite; saved.meta[sid] = m }
@@ -163,6 +171,8 @@ final class Tracker {
         let order: [Alert.Kind: Int] = [.blocked: 0, .failed: 1, .finished: 2]
         list.sort { (order[$0.kind]!, $0.ts) < (order[$1.kind]!, $1.ts) }
         if Date() < demoUntil { list = demo + list } else { demo = [] }
+        announce(list)
+        flushNotifications(list)
         if list != alerts {
             alerts = list
             onChange?(alerts)
@@ -318,30 +328,66 @@ final class Tracker {
 
     // MARK: The 1-second loop
 
-    private var dwell: [String: Int] = [:]
+    static let tickInterval = 0.5
+    /// Seconds each alerting session's tab has been in front while you were active.
+    private var dwell: [String: Double] = [:]
+    private var lastReap = Date(), lastReload = Date(), lastExpiry = Date()
 
     private func tick() {
-        ticks += 1
-        if !demo.isEmpty, Date() >= demoUntil { rebuild() }
-        if ticks % 20 == 0 { reapDeadSessions() }
-        if ticks % 10 == 0 { reload() }  // in case a filesystem event was missed
+        let now = Date()
+        if !demo.isEmpty, now >= demoUntil { rebuild() }
+        if now.timeIntervalSince(lastReap) > 10 { lastReap = now; reapDeadSessions() }
+        if !pendingNotify.isEmpty { flushNotifications(alerts) }
+        if now.timeIntervalSince(lastReload) > 10 { lastReload = now; reload() }  // in case an fs event was missed
         let real = alerts.filter { states[$0.sessionId] != nil }
         guard !real.isEmpty else { dwell.removeAll(); return }
-        if ticks % 60 == 0 { rebuild() }  // expiry
+        if now.timeIntervalSince(lastExpiry) > 30 { lastExpiry = now; rebuild() }
 
         fallbackMap()
         guard let t = ghostty.focusedTerminal() else { dwell.removeAll(); return }
-        let active = Presence.idleSeconds < 3
         // Learn the focused tab if exactly one alerting, unmapped session fits it.
         let fits = real.filter { !$0.mapped }.compactMap { states[$0.sessionId] }.filter { matches(t, $0) }
         if fits.count == 1, !saved.meta.values.contains(where: { $0.terminalId == t.id }) {
             assign(t.id, to: fits[0].sessionId)
         }
+        guard Settings.clearOnLook else { dwell.removeAll(); return }
+        let active = Presence.idleSeconds < 3
         for a in real {
             guard saved.meta[a.sessionId]?.terminalId == t.id, active else { dwell[a.sessionId] = 0; continue }
-            dwell[a.sessionId, default: 0] += 1
-            // Two ticks (about a second) so flicking through tabs does not clear everything.
-            if dwell[a.sessionId]! >= 2 { acknowledge(a.sessionId) }
+            dwell[a.sessionId, default: 0] += Tracker.tickInterval
+            // A short dwell, so flicking through tabs does not clear everything.
+            if dwell[a.sessionId]! >= Settings.lookSeconds { acknowledge(a.sessionId) }
+        }
+    }
+
+    // MARK: Sound and notifications for new Clawds
+
+    private var announced = Set<String>()
+    private var primed = false
+
+    private func announce(_ list: [Alert]) {
+        let keys = Set(list.filter { states[$0.sessionId] != nil }.map { "\($0.sessionId)@\($0.ts)" })
+        defer { announced = keys; primed = true }
+        // Nothing on launch for Clawds that were already there, nothing while paused.
+        guard primed, Settings.pausedUntil == nil else { return }
+        let fresh = list.filter { states[$0.sessionId] != nil && !announced.contains("\($0.sessionId)@\($0.ts)") }
+        guard !fresh.isEmpty else { return }
+        if Settings.sound { NSSound(named: NSSound.Name(Settings.soundName))?.play() }
+        if Settings.notify {
+            for a in fresh where a.kind != .finished || Settings.notifyFinished { pendingNotify[a.sessionId] = Date() }
+        }
+    }
+
+    /// Notifications wait (up to 8 s) for the Haiku recap, and are dropped if you saw the session first.
+    private var pendingNotify: [String: Date] = [:]
+
+    private func flushNotifications(_ list: [Alert]) {
+        for (sid, since) in pendingNotify {
+            guard let a = list.first(where: { $0.sessionId == sid }) else { pendingNotify[sid] = nil; continue }
+            if !a.recapPending || Date().timeIntervalSince(since) > 8 {
+                Notifier.shared.post(a)
+                pendingNotify[sid] = nil
+            }
         }
     }
 
@@ -361,6 +407,7 @@ final class Tracker {
         guard let s = states[sid] else { demo.removeAll { $0.sessionId == sid }; rebuild(); return }
         var m = saved.meta[sid] ?? Meta()
         m.ackTs = max(m.ackTs, s.statusTs)
+        Notifier.shared.clear(sid)
         saved.meta[sid] = m
         dwell[sid] = 0
         rebuild()
@@ -422,6 +469,16 @@ final class Tracker {
         demoUntil = Date().addingTimeInterval(30)
         rebuild()
     }
+
+    /// Settings → Recaps → Clear Saved Recaps.
+    func clearRecaps() {
+        saved.recaps = [:]
+        recapFailures = [:]
+        save()
+        rebuild()
+    }
+
+    var mappedCount: Int { alerts.filter { $0.mapped && states[$0.sessionId] != nil }.count }
 
     var unmappedCount: Int { alerts.filter { !$0.mapped && states[$0.sessionId] != nil }.count }
     var liveSessionCount: Int { states.count }

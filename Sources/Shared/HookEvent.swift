@@ -8,17 +8,31 @@ enum HookEvent {
     /// Background task types that will wake the session up again on their own.
     static let wakingTaskTypes: Set<String> = ["subagent", "workflow", "teammate", "cloud session"]
 
+    /// `pid`/`pidStart`: the Claude process that ran this hook. `processCwd`: its working directory.
+    /// `isAlive` is injectable for the self-test.
     static func apply(_ input: [String: Any], to state: inout SessionState?, now: Double,
-                      pid: Int32? = nil, pidStart: Double? = nil, termProgram: String? = nil) -> Outcome {
+                      pid: Int32? = nil, pidStart: Double? = nil, processCwd: String? = nil, termProgram: String? = nil,
+                      isAlive: (Int32, Double?) -> Bool = ProcInfo.isAlive) -> Outcome {
         guard let event = input["hook_event_name"] as? String,
               let sid = input["session_id"] as? String, !sid.isEmpty else { return .ignore }
         let cwd = (input["cwd"] as? String) ?? state?.cwd ?? ""
 
+        // A session belongs to the Claude process that started it. A `claude` run from inside a
+        // session inherits CLAUDE_CODE_SESSION_ID, so its events arrive under the same session ID:
+        // while the owner lives, they must not reset, finish or end the owner's session.
+        var takeover = false
+        if let owner = state?.claudePid, let pid, owner != pid {
+            if isAlive(owner, state?.claudeStart) { return .ignore }
+            takeover = true  // the old process is gone: a resume in a new process
+        }
+
         if event == "SessionEnd" { return state == nil ? .ignore : .delete }
 
-        var s = state ?? SessionState(sessionId: sid, cwd: cwd)
+        let root = processCwd ?? cwd
+        var s = state ?? SessionState(sessionId: sid, cwd: root)
         // Async hooks can finish out of order; never let an older event overwrite a newer one.
         if state != nil, now < s.updatedTs { return .ignore }
+        if takeover { s.rootCwd = root }
         let before = s
 
         func set(_ status: SessionStatus) {
@@ -32,7 +46,7 @@ enum HookEvent {
             let source = input["source"] as? String ?? "startup"
             if source != "compact" {
                 set(.idle)
-                s.rootCwd = cwd
+                s.rootCwd = root
                 s.detail = nil
             }
         case "UserPromptSubmit":

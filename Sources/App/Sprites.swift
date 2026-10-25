@@ -38,7 +38,6 @@ final class SpriteLibrary {
     static let placeholder = "Placeholder"
     /// Finished sessions get one of these (plus any extra art), stable per session.
     static let finishedDefaults = ["JumpingHappy", "Dancing", "Cloud-once", "RacingCar"]
-    private static let reserved: Set<String> = [blocked, failed, placeholder, "Lurking"]
 
     private(set) var sprites: [String: Sprite] = [:]
     /// Tallest sprite, so the strip height never jumps as Clawds come and go.
@@ -67,9 +66,14 @@ final class SpriteLibrary {
 
     subscript(name: String) -> Sprite? { sprites[name] ?? sprites[SpriteLibrary.placeholder] }
 
+    /// Every animation finished sessions may use: not the "needs you" or "error" ones, not those you
+    /// switched off in Settings (unless you switched off all of them).
     var finishedPool: [String] {
-        let extras = sprites.keys.filter { !SpriteLibrary.reserved.contains($0) && !SpriteLibrary.finishedDefaults.contains($0) }.sorted()
-        return (SpriteLibrary.finishedDefaults + extras).filter { sprites[$0] != nil }
+        let reserved: Set<String> = [SpriteLibrary.placeholder, "Lurking", Settings.blockedSprite, Settings.failedSprite]
+        let extras = sprites.keys.filter { !reserved.contains($0) && !SpriteLibrary.finishedDefaults.contains($0) }.sorted()
+        let all = (SpriteLibrary.finishedDefaults + extras).filter { sprites[$0] != nil && !reserved.contains($0) }
+        let on = all.filter { !Settings.finishedDisabled.contains($0) }
+        return on.isEmpty ? all : on
     }
 
     /// A finished-pool sprite for `sessionId`, avoiding ones already on screen when possible.

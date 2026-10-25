@@ -19,7 +19,10 @@ $B --selftest               # must print ALL PASS (includes a byte-exact round t
 $B --recap "text"           # the app's recap code path, prints the line or the error
 $B --fetch-art              # download + convert the Clawd GIFs now, print sprite sizes
 $B --install-hooks | --remove-hooks | --hooks-status
+$B --displays               # each display's UUID and saved spot
+$B --open-settings [TAB]    # opens the running app's Settings on a tab (distributed notification)
 $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps it (needs ffmpeg)
+$B --snapshot-settings DIR  # every Settings pane, offscreen (switches render "off" there: use the real window)
 ```
 
 Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse-as-library`,
@@ -81,9 +84,30 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
   screen's backing scale; layers use nearest-neighbour filtering. There is no "tiny" size for this reason.
 - Gatekeeper: releases are ad-hoc signed, not notarized; README tells users to right-click → Open.
 
+## Settings, placement, the Dock
+
+- Every preference is a UserDefaults key in `Settings.Key`; the Settings window binds the same keys with
+  `@AppStorage`, so defaults in `Settings` and in the panes must match. AppDelegate coalesces
+  `UserDefaults.didChangeNotification` into one `.settingsChanged`. That notification only fires for
+  changes made in this process: `defaults write` from a shell is picked up on the next relayout.
+- The strip's spot is stored per display (`Placements`, keyed by the display UUID from
+  `CGDisplayCreateUUIDFromDisplayID`). A spot is a corner or a fraction of the visible frame for the
+  leading Clawd. `StripGeometry` (pure, self-tested) lays out cells from it and flips the growth
+  direction when the right side would run off-screen.
+- Animated relayouts set the panel to the union of the old and new strip rects first, so cells never
+  clip mid-flight, then shrink it back (`settle`). A generation counter drops stale completions.
+- **NSHostingController in an NSTabViewController needs `sizingOptions = .preferredContentSize`**, or the
+  window ignores the pane size and clips it. 680 pt fits all eight toolbar tabs without an overflow menu.
+- The app is `LSUIElement`; opening Settings switches to `.regular` (Dock icon, menu bar with Edit so
+  copy/paste work in text fields) and closing it switches back to `.accessory`.
+- 1.0 stored `screen = mouse`; launch migrates it to `follow`, or the display picker shows nothing.
+
 ## Data
 
 `~/Library/Application Support/Claws for Concern/`: `sessions/<id>.json` (hook-written state, one per
 live session, `.lock` for flock), `app-state.json` (tab mapping, what was seen, recap cache),
 `art/` (sprites.json + PNG strips), `extra-art.txt`, `summarizer/` (empty cwd), `claws.log`.
+Session ownership: the hook records the Claude process that started a session (`claude_pid`) and
+ignores events from any other live Claude process under the same ID: a `claude` run inside a session
+inherits `CLAUDE_CODE_SESSION_ID`, and its events once reset this session's state.
 UserDefaults domain `io.github.patildhruv.claws-for-concern`.
