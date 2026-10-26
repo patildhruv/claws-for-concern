@@ -125,7 +125,7 @@ enum StripGeometry {
 
 /// The always-on-top strip of Clawds, one per session that needs you.
 final class OverlayController {
-    let panel = StripPanel()
+    private(set) var panel = StripPanel()
     private let tracker: Tracker
     private let bubble = BubblePanel()
     private let lib = SpriteLibrary.shared
@@ -146,6 +146,8 @@ final class OverlayController {
     // Dragging the strip.
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint = .zero
+    private var dragStartDisplay: String?
+    private var dragLeftDisplay = false
     private(set) var dragging = false
 
     static let overflowID = "__overflow__"
@@ -214,9 +216,23 @@ final class OverlayController {
         hideBubble(now: true)
         NSAnimationContext.runAnimationGroup({ $0.duration = 0.12; panel.animator().alphaValue = 0 }, completionHandler: {
             self.displayKey = key
+            self.freshPanel()
             self.relayout(animated: false)
             NSAnimationContext.runAnimationGroup { $0.duration = 0.2; self.panel.animator().alphaValue = Settings.opacity }
         })
+    }
+
+    /// Moves the strip into a new window. After the strip was dragged from one display to another,
+    /// macOS (seen on 27.0.1) could stop drawing its window on one of them for good: listed on screen
+    /// at full opacity, layers intact, nothing drawn. Re-showing the window did not help; a new one
+    /// did, every time. The cause inside macOS is unknown, so following you to another display, and a
+    /// drag that touched another one, both end in a new window.
+    private func freshPanel() {
+        let old = panel, fresh = StripPanel()
+        fresh.alphaValue = old.alphaValue
+        for v in old.contentView?.subviews ?? [] { fresh.contentView?.addSubview(v) }
+        old.orderOut(nil)
+        panel = fresh
     }
 
     // MARK: Updates
@@ -362,10 +378,15 @@ final class OverlayController {
             hideBubble(now: true)
             settle(generation)
             dragStartOrigin = panel.frame.origin
+            dragStartDisplay = Placements.displayKey(screen)
+            dragLeftDisplay = false
             NSCursor.closedHand.push()
             NSAnimationContext.runAnimationGroup { $0.duration = 0.1; panel.animator().alphaValue = Settings.opacity * 0.85 }
         }
         panel.setFrameOrigin(NSPoint(x: dragStartOrigin.x + p.x - start.x, y: dragStartOrigin.y + p.y - start.y))
+        if !dragLeftDisplay {
+            dragLeftDisplay = NSScreen.screens.contains { $0.frame.intersects(panel.frame) && Placements.displayKey($0) != dragStartDisplay }
+        }
         return true
     }
 
@@ -389,7 +410,12 @@ final class OverlayController {
         }
         displayKey = key
         Placements.set(place, for: target)   // posts .settingsChanged, which relayouts
-        relayout(animated: true)
+        if dragLeftDisplay || key != dragStartDisplay {
+            // Not from inside the mouse-up that is still being handled: right after it.
+            DispatchQueue.main.async { self.freshPanel(); self.relayout(animated: false) }
+        } else {
+            relayout(animated: true)
+        }
         return true
     }
 

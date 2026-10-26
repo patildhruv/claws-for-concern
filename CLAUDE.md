@@ -87,6 +87,12 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
   backups now get a counter.
 - **Pixel art must land on whole device pixels.** `OverlayController.artPoints` snaps the size to the
   screen's backing scale; layers use nearest-neighbour filtering. There is no "tiny" size for this reason.
+- **A drag across displays could leave the strip's window undrawn on one display for good** (macOS
+  27.0.1, laptop 2x + external 1x): listed on screen, full opacity, layers intact, nothing composited.
+  Reproduced every time by dragging from the external's bottom-left corner to the laptop, then
+  following the pointer back. Re-ordering the window did not help; a new window did, so
+  `OverlayController.freshPanel()` runs on every follow move and after any drag that touched another
+  display. Bare test panels never broke, so the cause inside macOS is unknown.
 - Gatekeeper: releases are ad-hoc signed, not notarized; README tells users to right-click → Open.
 
 ## Terminal adapters (`Sources/App/Terminals/`, guide: docs/adapters.md)
