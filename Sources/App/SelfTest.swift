@@ -221,10 +221,13 @@ enum SelfTest {
         check("restore: a relaunch is each entry's one chance", RestorePlan.spent(e, .noPane, launched: 150)
               && !RestorePlan.spent(e, .resume, launched: 150) && !RestorePlan.spent(e, .noPane, launched: 50)
               && !RestorePlan.spent(e, .noPane, launched: nil))
-        check("restore: a tab closed while the terminal kept running is forgotten",
-              RestorePlan.closedTabs([e], panes: [pane("X")], launched: 50) == ["s"]
-                && RestorePlan.closedTabs([e], panes: [pane()], launched: 50).isEmpty
-                && RestorePlan.closedTabs([e], panes: [pane("X")], launched: 150).isEmpty)
+        var hosted = e
+        hosted.claudeStart = 60
+        check("restore: the terminal that hosted it still runs (Cmd-W, claude ended in an open tab)",
+              RestorePlan.hostStayed(hosted, launches: [50]) && RestorePlan.hostStayed(hosted, launches: [200, 10]))
+        check("restore: the terminal went away with it (quit, crash, restart)",
+              !RestorePlan.hostStayed(hosted, launches: []) && !RestorePlan.hostStayed(hosted, launches: [70])
+                && !RestorePlan.hostStayed(e, launches: [150]) && RestorePlan.hostStayed(e, launches: [99]))
 
         var w = RestoreWait(start: 0)
         let busy = [pane(fg: "login")], idle = [pane()]

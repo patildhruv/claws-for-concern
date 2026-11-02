@@ -525,7 +525,7 @@ final class Tracker {
             guard Tracker.removeSessionFile(s) else { pending.insert(s.sessionId); continue }
             guard a.restoresPanes, let pane else { continue }
             keep.append(RestoreEntry(sessionId: s.sessionId, adapter: a.id, pane: pane, folder: s.rootCwd, title: title(for: s),
-                                     endedTs: s.endedTs ?? s.updatedTs, reason: s.endReason ?? "vanished"))
+                                     endedTs: s.endedTs ?? s.updatedTs, reason: s.endReason ?? "vanished", claudeStart: s.claudeStart))
         }
         restorer.remember(keep)
         return pending

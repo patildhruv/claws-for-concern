@@ -15,9 +15,12 @@ struct RestoreEntry: Codable, Equatable {
     var endedTs: Double
     /// SessionEnd's reason ("other"), or "vanished" when the process went without one.
     var reason: String
+    /// When the session's Claude process started: the terminal process that hosted it is one that
+    /// launched before this.
+    var claudeStart: Double?
 
     enum CodingKeys: String, CodingKey {
-        case sessionId = "session_id", adapter, pane, folder, title, endedTs = "ended_ts", reason
+        case sessionId = "session_id", adapter, pane, folder, title, endedTs = "ended_ts", reason, claudeStart = "claude_start"
     }
 }
 
@@ -112,12 +115,13 @@ enum RestorePlan {
         return v != .resume
     }
 
-    /// Sessions whose tab was closed (Cmd-W) while the terminal kept running: the process that
-    /// hosted them is still up and no longer lists their pane. After a quit the terminal is gone
-    /// or newer than the end, so those entries stay.
-    static func closedTabs(_ entries: [RestoreEntry], panes: [RestorePane], launched: Double) -> [String] {
-        let ids = Set(panes.map(\.id))
-        return entries.filter { launched < $0.endedTs && !ids.contains($0.pane) }.map(\.sessionId)
+    /// Restore is for a terminal that went away with its sessions (a quit, a crash, a restart), not
+    /// for a tab closed with Cmd-W or a claude that ended in a tab that stayed open: then the
+    /// terminal process that hosted the session, one launched before its Claude process, still runs.
+    /// `launches`: launch times of the terminal's running processes.
+    static func hostStayed(_ e: RestoreEntry, launches: [Double]) -> Bool {
+        let start = e.claudeStart ?? e.endedTs
+        return launches.contains { $0 < start }
     }
 
     static func command(_ template: String, _ e: RestoreEntry) -> String {
@@ -176,7 +180,13 @@ final class Restorer {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier else { return }
-            for a in self.adapters where a.appBundleID == id { self.begin(a, why: "launched") }
+            for a in self.adapters where a.appBundleID == id {
+                // A quick quit and relaunch (an update's restart) can beat the old sessions' SessionEnd
+                // to the ledger: with nothing remembered yet, look once more a moment later.
+                if !self.begin(a, why: "launched") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.begin(a, why: "launched") }
+                }
+            }
         }
         nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier,
@@ -212,7 +222,7 @@ final class Restorer {
         entries.forEach { ledger.add($0) }
         ledger.save()
         log("remembered " + entries.map { "\($0.sessionId.prefix(8)) (\($0.reason), pane \($0.pane.prefix(8)))" }.joined(separator: ", "))
-        dropClosedTabs(entries)
+        dropIfHostStayed(entries)
     }
 
     /// Live sessions, on every reload: an entry whose session is back (resumed), or whose pane now
@@ -229,27 +239,29 @@ final class Restorer {
             .joined(separator: ", "))
     }
 
-    /// Cmd-W: a tab closed while its terminal kept running never comes back. Checked a few seconds
-    /// after the end, and confirmed a little later, because a terminal still quitting lists no tabs.
-    private func dropClosedTabs(_ entries: [RestoreEntry]) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+    /// How long after an entry is remembered its terminal must be gone. A quit takes a second or two
+    /// after its sessions end; a session reaped as vanished after a crash or a restart finds it gone.
+    static let hostWindow: Double = 12
+
+    /// Cmd-W, or claude ending (Ctrl-C, a crash, a kill) in a tab that stays open: the terminal that
+    /// hosted the session is still running a while later, so there is nothing to restore.
+    private func dropIfHostStayed(_ entries: [RestoreEntry]) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Restorer.hostWindow) { [weak self] in
             guard let self else { return }
-            for a in self.adapters {
-                let mine = entries.filter { $0.adapter == a.id }
-                guard !mine.isEmpty, let app = self.running(a), let launched = app.launchDate?.timeIntervalSince1970,
-                      mine.contains(where: { launched < $0.endedTs }), self.permitted(a) else { continue }
-                self.terminals.worker.run {
-                    let panes = a.restorablePanes()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        guard let panes, !app.isTerminated else { return }
-                        let closed = Set(RestorePlan.closedTabs(mine, panes: panes, launched: launched))
-                        guard self.ledger.remove(where: { closed.contains($0.sessionId) }) else { return }
-                        self.ledger.save()
-                        self.log("forgot " + closed.map { "\($0.prefix(8))" }.sorted().joined(separator: ", ") + ": tab closed while \(a.name) kept running")
-                    }
-                }
+            let stayed = entries.filter { e in
+                self.terminals.adapter(id: e.adapter).map { RestorePlan.hostStayed(e, launches: self.launches($0)) } ?? false
             }
+            guard self.ledger.remove(where: { stayed.contains($0) }) else { return }
+            self.ledger.save()
+            self.log("forgot " + stayed.map { "\($0.sessionId.prefix(8))" }.joined(separator: ", ")
+                     + ": its terminal is still running (tab closed, or claude ended in an open tab)")
         }
+    }
+
+    private func launches(_ a: TerminalAdapter) -> [Double] {
+        guard let b = a.appBundleID else { return [] }
+        return NSRunningApplication.runningApplications(withBundleIdentifier: b)
+            .filter { !$0.isTerminated }.compactMap { $0.launchDate?.timeIntervalSince1970 }
     }
 
     // The restore itself.
@@ -305,16 +317,17 @@ final class Restorer {
         if ledger.remove(where: { spent.contains($0.sessionId) }) { ledger.save() }
         guard !ready.isEmpty else { underWay.remove(a.id); return }
         if withoutAsking ?? Settings.restoreWithoutAsking { resume(a, ready); return }
-        if headless {
-            log("would ask to resume \(ready.count) (pass --yes to resume)")
-            underWay.remove(a.id)
-            return
-        }
         let n = ready.count
         let text = n == 1 ? "\(a.name) reopened a tab that was running Claude Code. Resume it?"
             : "\(a.name) reopened \(n) tabs that were running Claude Code. Resume them?"
+        let items = ready.map { (title: $0.title, folder: ($0.folder as NSString).lastPathComponent) }
+        if headless {
+            log("would ask: \(text) " + items.map { "\"\($0.title)\" in \($0.folder)" }.joined(separator: ", ") + " (pass --yes to resume)")
+            underWay.remove(a.id)
+            return
+        }
         promptFor = a.id
-        prompt = RestorePrompt(message: text, titles: ready.map(\.title)) { [weak self] resume, always in
+        prompt = RestorePrompt(message: text, items: items) { [weak self] resume, always in
             guard let self else { return }
             self.prompt = nil
             self.promptFor = nil
@@ -372,7 +385,8 @@ final class RestorePrompt: NSObject, NSWindowDelegate {
     private let panel: NSPanel
     private var answer: ((_ resume: Bool, _ always: Bool) -> Void)?
 
-    init(message: String, titles: [String], answer: @escaping (_ resume: Bool, _ always: Bool) -> Void) {
+    /// `items`: what Resume brings back, each session's title and folder name.
+    init(message: String, items: [(title: String, folder: String)], answer: @escaping (_ resume: Bool, _ always: Bool) -> Void) {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
                         styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
@@ -383,7 +397,7 @@ final class RestorePrompt: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        let host = NSHostingView(rootView: RestorePromptView(message: message, titles: titles) { [weak self] r, a in self?.finish(r, a) })
+        let host = NSHostingView(rootView: RestorePromptView(message: message, items: items) { [weak self] r, a in self?.finish(r, a) })
         panel.contentView = host
         panel.setContentSize(host.fittingSize)
     }
@@ -416,9 +430,10 @@ final class RestorePrompt: NSObject, NSWindowDelegate {
 
 private struct RestorePromptView: View {
     let message: String
-    let titles: [String]
+    let items: [(title: String, folder: String)]
     let answer: (Bool, Bool) -> Void
     @State private var always = false
+    static let shown = 5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -426,11 +441,12 @@ private struct RestorePromptView: View {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(message).font(.headline).fixedSize(horizontal: false, vertical: true)
-                    ForEach(Array(titles.prefix(6).enumerated()), id: \.offset) { _, t in
-                        Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    ForEach(Array(items.prefix(Self.shown).enumerated()), id: \.offset) { _, it in
+                        (Text(it.title) + Text("  ·  \(it.folder)").foregroundColor(.secondary))
+                            .font(.callout).lineLimit(1).truncationMode(.tail)
                     }
-                    if titles.count > 6 {
-                        Text("and \(titles.count - 6) more").font(.callout).foregroundStyle(.secondary)
+                    if items.count > Self.shown {
+                        Text("and \(items.count - Self.shown) more").font(.callout).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -460,6 +476,8 @@ enum RestoreCLI {
     /// Before anything touches `Terminals.shared`.
     private static func setUp(_ args: [String]) {
         if let id = option("--bundle-id", args) { GhosttyAdapter.target = id }
+        // Each step as it happens, also when the output goes to a file.
+        setvbuf(stdout, nil, _IOLBF, 0)
         _ = NSApplication.shared
     }
 
