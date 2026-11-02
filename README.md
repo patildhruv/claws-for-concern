@@ -113,6 +113,8 @@ tab. It is careful about where and when:
 - Never for a session you ended yourself (`/exit`, Ctrl-C) or a tab you closed. Only sessions that
   ended because Ghostty quit, crashed or the Mac restarted come back.
 - Once per relaunch. Not now means not now.
+- It never answers a question for you. A session in a folder Claude Code asks you to trust (your home
+  folder always asks) waits at that question until you answer it.
 
 Restore needs Ghostty 1.4 or later with `window-save-state = always` in its config, so that Ghostty
 brings its tabs back. Settings → General → Restore says if yours does not. Other terminals can add
