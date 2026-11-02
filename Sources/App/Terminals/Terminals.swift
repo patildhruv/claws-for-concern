@@ -27,23 +27,58 @@ struct PaneInfo: Equatable {
 /// A pane as a restore sees it: may a resume command be typed into it?
 struct RestorePane: Equatable {
     let id: String
-    let cwd: String
+    /// The pane's terminal device, as the terminal reports it.
+    let tty: String?
     /// The foreground process's name ("zsh", "vim"), "" if unknown.
     let foreground: String
-    /// A shell is in front: nothing else runs in the pane.
-    let atShell: Bool
-    /// When the foreground process started (epoch seconds). A tab the terminal reopened has a
-    /// shell newer than the session's end; a tab that stayed open does not.
+    /// When the foreground process started (epoch seconds): a tab reopened by a relaunch has a shell
+    /// that started with the terminal.
     let started: Double?
+    /// The foreground process's working directory, from the kernel (no file system access).
+    let cwd: String?
+    /// Why the pane is not the tab's own login shell waiting at its prompt; nil when it is.
+    let problem: String?
 
-    /// For terminals that report each pane's foreground process ID.
-    static func from(id: String, cwd: String, foregroundPid pid: Int32?) -> RestorePane {
+    var atShell: Bool { problem == nil }
+
+    /// What the kernel says about a pane's foreground process (Ghostty's `pid`, which is the leader
+    /// of the terminal's foreground process group).
+    struct Foreground: Equatable {
+        var name: String
+        var uid: uid_t
+        var parentName: String
+        var parentPid: Int32
+        var pgid: Int32
+        var tpgid: Int32
+        var tty: String?
+    }
+
+    /// The tab's own login shell, alone in front: a shell, ours, started by `login` or by the
+    /// terminal itself, in the foreground of the pane's tty. A script waiting on `read` is a shell
+    /// too, but its parent is the login shell, so it is refused.
+    static func problem(_ f: Foreground, paneTTY: String?, hostPid: Int32?, uid: uid_t = getuid()) -> String? {
+        guard isShell(f.name) else { return "\(f.name.isEmpty ? "something" : f.name) is running" }
+        guard f.uid == uid else { return "the shell belongs to another user" }
+        guard f.parentName == "login" || (hostPid != nil && f.parentPid == hostPid) else {
+            return "a shell started from \(f.parentName.isEmpty ? "another program" : f.parentName) is waiting, not the tab's own shell"
+        }
+        guard f.pgid == f.tpgid else { return "something else is in the foreground" }
+        guard let paneTTY, f.tty == paneTTY else { return "the shell is not on the tab's tty" }
+        return nil
+    }
+
+    /// For terminals that report each pane's tty and foreground process. `hostPid`: the terminal
+    /// app's process, which may start shells itself.
+    static func from(id: String, tty: String?, foregroundPid pid: Int32?, hostPid: Int32?) -> RestorePane {
         guard let pid, pid > 0, let e = ProcInfo.info(pid) else {
-            return RestorePane(id: id, cwd: cwd, foreground: "", atShell: false, started: nil)
+            return RestorePane(id: id, tty: tty, foreground: "", started: nil, cwd: nil, problem: "nothing is running")
         }
         let path = ProcInfo.path(pid)
         let name = path.isEmpty ? e.name : (path as NSString).lastPathComponent
-        return RestorePane(id: id, cwd: cwd, foreground: name, atShell: isShell(name), started: e.start)
+        let f = Foreground(name: name, uid: e.uid, parentName: ProcInfo.info(e.ppid)?.name ?? "", parentPid: e.ppid,
+                           pgid: e.pgid, tpgid: e.tpgid, tty: ProcInfo.tty(pid))
+        return RestorePane(id: id, tty: tty, foreground: name, started: e.start, cwd: ProcInfo.cwd(pid),
+                           problem: problem(f, paneTTY: tty, hostPid: hostPid))
     }
 
     static let shells: Set<String> = ["zsh", "bash", "sh", "dash", "fish", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh", "pwsh"]
@@ -351,16 +386,25 @@ enum Script {
     private static var cache: [String: NSAppleScript] = [:]
 
     static func run(_ source: String, cacheKey: String? = nil) -> NSAppleEventDescriptor? {
+        attempt(source, cacheKey: cacheKey).result
+    }
+
+    /// The result, or the AppleScript error number (-1712: timed out; -2753: a term the app's
+    /// dictionary does not define, so it ran as an undefined variable).
+    static func attempt(_ source: String, cacheKey: String? = nil) -> (result: NSAppleEventDescriptor?, error: Int?) {
         let script: NSAppleScript
         if let k = cacheKey, let s = cache[k] { script = s } else {
-            guard let s = NSAppleScript(source: source) else { return nil }
+            guard let s = NSAppleScript(source: source) else { return (nil, nil) }
             if let k = cacheKey { cache[k] = s }
             script = s
         }
         var err: NSDictionary?
         let r = script.executeAndReturnError(&err)
-        return err == nil ? r : nil
+        guard let err else { return (r, nil) }
+        return (nil, (err[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0)
     }
+
+    static let undefinedTerm = -2753
 
     /// Quotes a value for an AppleScript string literal.
     static func quote(_ s: String) -> String {

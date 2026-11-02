@@ -3,46 +3,73 @@ import SwiftUI
 
 // MARK: - The ledger
 
-/// A session that ended with its terminal tab (the terminal quit or crashed, the Mac restarted),
-/// kept so it can be resumed once the terminal reopens that tab.
+/// A session that ended with its terminal (the terminal quit or crashed, the Mac restarted), kept
+/// so it can be resumed once the terminal reopens its tab.
 struct RestoreEntry: Codable, Equatable {
     var sessionId: String
     var adapter: String
     var pane: String
-    /// The folder Claude was started in, which is the tab's working directory.
+    /// The folder Claude was started in, from the kernel: the reopened shell's own working directory.
     var folder: String
     var title: String
     var endedTs: Double
     /// SessionEnd's reason ("other"), or "vanished" when the process went without one.
     var reason: String
-    /// When the session's Claude process started: the terminal process that hosted it is one that
-    /// launched before this.
-    var claudeStart: Double?
+    /// The terminal process the session ran under, and its start time: restore needs it gone.
+    var hostPid: Int32?
+    var hostStart: Double?
+    /// The terminal launch this entry was offered at. That launch is its only chance.
+    var launch: Double?
 
     enum CodingKeys: String, CodingKey {
-        case sessionId = "session_id", adapter, pane, folder, title, endedTs = "ended_ts", reason, claudeStart = "claude_start"
+        case sessionId = "session_id", adapter, pane, folder, title, endedTs = "ended_ts", reason
+        case hostPid = "host_pid", hostStart = "host_start", launch
     }
 }
 
-/// `restore.json`, written by the app only. An entry goes once it is resumed or dismissed, when its
-/// pane hosts another session, after the relaunch that did not bring its tab back, or after a week.
+/// `restore.json`. An entry goes once it is resumed or dismissed, when its pane hosts another
+/// session, when its terminal outlives it, after the launch that was its chance, or after a week.
 struct RestoreLedger: Codable, Equatable {
     static let maxAge: Double = 7 * 24 * 3600
     var entries: [RestoreEntry] = []
 
+    /// Anything but a UUID for a session ID is dropped: the ID ends up typed into a shell.
     static func load(_ url: URL = Paths.restore) -> RestoreLedger {
-        guard let d = try? Data(contentsOf: url), let l = try? JSONDecoder().decode(RestoreLedger.self, from: d) else {
+        guard let d = try? Data(contentsOf: url), var l = try? JSONDecoder().decode(RestoreLedger.self, from: d) else {
             return RestoreLedger()
         }
+        l.entries.removeAll { !ResumeRequest.isSessionID($0.sessionId) }
         return l
     }
 
-    func save(_ url: URL = Paths.restore) {
+    private func save(_ url: URL) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let d = try? enc.encode(self) else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? d.write(to: url, options: .atomic)
+    }
+
+    /// Load, change and save under `restore.lock`, reading the file again inside the lock: the app
+    /// and the command line may both write it. Waits up to a second for the lock; nil if it never came.
+    @discardableResult
+    static func update(_ url: URL = Paths.restore, _ change: (inout RestoreLedger) -> Void) -> RestoreLedger? {
+        let dir = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fd = Darwin.open(dir.appendingPathComponent("restore.lock").path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var locked = false
+        for _ in 0..<100 {
+            if flock(fd, LOCK_EX | LOCK_NB) == 0 { locked = true; break }
+            usleep(10_000)
+        }
+        guard locked else { return nil }
+        defer { flock(fd, LOCK_UN) }
+        let before = load(url)
+        var l = before
+        change(&l)
+        if l != before { l.save(url) }
+        return l
     }
 
     /// One entry per session, and one per pane: the last session to end in a pane is the one to
@@ -53,87 +80,117 @@ struct RestoreLedger: Codable, Equatable {
         entries.append(e)
     }
 
-    /// True if anything went.
-    @discardableResult
-    mutating func remove(where drop: (RestoreEntry) -> Bool) -> Bool {
-        let n = entries.count
-        entries.removeAll(where: drop)
-        return entries.count != n
-    }
+    mutating func remove(where drop: (RestoreEntry) -> Bool) { entries.removeAll(where: drop) }
 
-    @discardableResult
-    mutating func expire(now: Double) -> Bool { remove { now - $0.endedTs > RestoreLedger.maxAge } }
+    mutating func expire(now: Double) { remove { now - $0.endedTs > RestoreLedger.maxAge } }
 }
 
 // MARK: - The rules (pure, self-tested)
 
 enum RestorePlan {
+    /// The running terminal process a restore would type into.
+    struct Launch: Equatable {
+        /// When it launched (epoch seconds).
+        let at: Double
+        /// Claws saw it launch, or started within `observeWindow` after it.
+        let observed: Bool
+    }
+
+    static let observeWindow: Double = 120
+    /// A tab the relaunch reopened has a shell that started with the terminal.
+    static let shellWindow: Double = 60
+    /// A terminal still running this long after a session ended did not go away with it.
+    static let hostWindow: Double = 12
+    /// You typed or moved the pointer this recently: you may be typing in that tab.
+    static let activeWindow: Double = 3
+
     enum Verdict: Equatable {
-        case resume, noPane, busy(String), notReopened, otherFolder(String), expired
+        case resume, expired, otherLaunch, noHost, hostRunning, notRelaunched, launchMissed, noPane, busy(String),
+             notFromLaunch, otherFolder(String)
 
         var why: String {
             switch self {
             case .resume: return "resume"
-            case .noPane: return "skip: no tab with that ID (closed, or not reopened)"
-            case .busy(let p): return "skip: \(p) is running in that tab, not a shell"
-            case .notReopened: return "skip: the tab was not reopened (its shell is older than the session's end)"
-            case .otherFolder(let f): return "skip: the tab is in another folder (\(f))"
             case .expired: return "skip: ended more than a week ago"
+            case .otherLaunch: return "skip: it was offered at an earlier launch"
+            case .noHost: return "skip: the terminal it ran in is not known"
+            case .hostRunning: return "skip: the terminal it ran in is still running (tab closed, or claude ended in an open tab)"
+            case .notRelaunched: return "skip: this terminal was already running when the session ended"
+            case .launchMissed: return "skip: Claws was not there when this terminal launched"
+            case .noPane: return "skip: no tab with that ID (closed, or not reopened)"
+            case .busy(let why): return "skip: \(why)"
+            case .notFromLaunch: return "skip: the tab's shell did not start with this launch"
+            case .otherFolder(let f): return "skip: the tab's shell is in another folder (\(f))"
             }
         }
     }
 
-    /// The safety rules: type only into a tab that exists under the entry's pane ID, with a shell
-    /// in front (nothing running), reopened since the session ended (its shell is newer), and in the
-    /// session's folder.
-    static func verdict(_ e: RestoreEntry, panes: [RestorePane], now: Double) -> Verdict {
+    /// Type only when the terminal process the session ran under is gone (`hostAlive` false), the
+    /// terminal running now launched after the session ended and Claws saw that launch, and the tab
+    /// with the entry's ID has its own login shell waiting at the prompt, started with that launch,
+    /// in the session's folder. `hostAlive`: nil when the entry does not name its terminal.
+    static func verdict(_ e: RestoreEntry, panes: [RestorePane], launch: Launch, hostAlive: Bool?, now: Double) -> Verdict {
         if now - e.endedTs > RestoreLedger.maxAge { return .expired }
+        if let l = e.launch, l != launch.at { return .otherLaunch }
+        guard let hostAlive else { return .noHost }
+        if hostAlive { return .hostRunning }
+        guard launch.at > e.endedTs else { return .notRelaunched }
+        guard launch.observed else { return .launchMissed }
         guard let p = panes.first(where: { $0.id == e.pane }) else { return .noPane }
-        guard p.atShell else { return .busy(p.foreground.isEmpty ? "something" : p.foreground) }
-        guard let started = p.started, started > e.endedTs else { return .notReopened }
-        guard samePath(p.cwd, e.folder) else { return .otherFolder(p.cwd) }
+        if let problem = p.problem { return .busy(problem) }
+        guard let s = p.started, s >= launch.at - 1, s <= launch.at + shellWindow else { return .notFromLaunch }
+        guard let cwd = p.cwd, cwd == e.folder else { return .otherFolder(p.cwd ?? "unknown") }
         return .resume
     }
 
-    /// The same folder once symlinks are resolved (/tmp is /private/tmp).
-    static func samePath(_ a: String, _ b: String) -> Bool {
-        !a.isEmpty && !b.isEmpty && canonical(a) == canonical(b)
+    /// Claws saw the launch, or started at most `observeWindow` after it (at login, say).
+    static func observed(launchAt: Double, sawLaunch: Bool, startedAt: Double) -> Bool {
+        sawLaunch || (startedAt >= launchAt - 5 && startedAt - launchAt <= observeWindow)
     }
 
-    static func canonical(_ path: String) -> String {
-        var p = path
-        if p.hasPrefix("file://"), let u = URL(string: p) { p = u.path }
-        guard let r = realpath(p, nil) else { return (p as NSString).standardizingPath }
-        defer { free(r) }
-        return String(cString: r)
+    /// After a settled look at `launch`: an entry that cannot be resumed and ended before it has had
+    /// its one chance, and so has one offered at an earlier launch.
+    static func spent(_ e: RestoreEntry, _ v: Verdict, launch: Launch) -> Bool {
+        switch v {
+        case .resume: return false
+        case .otherLaunch, .expired: return true
+        default: return e.endedTs < launch.at
+        }
     }
 
-    /// Every entry gets one chance per relaunch: one that ended before this terminal process
-    /// started and cannot be resumed now never will be (its tab was not brought back).
-    static func spent(_ e: RestoreEntry, _ v: Verdict, launched: Double?) -> Bool {
-        guard let launched, e.endedTs < launched else { return false }
-        return v != .resume
+    /// The terminal process the session ran under still runs `hostWindow` after the end.
+    static func hostStayed(_ e: RestoreEntry, now: Double, alive: (Int32, Double?) -> Bool) -> Bool {
+        guard let pid = e.hostPid else { return false }
+        return now - e.endedTs >= hostWindow && alive(pid, e.hostStart)
     }
 
-    /// Restore is for a terminal that went away with its sessions (a quit, a crash, a restart), not
-    /// for a tab closed with Cmd-W or a claude that ended in a tab that stayed open: then the
-    /// terminal process that hosted the session, one launched before its Claude process, still runs.
-    /// `launches`: launch times of the terminal's running processes.
-    static func hostStayed(_ e: RestoreEntry, launches: [Double]) -> Bool {
-        let start = e.claudeStart ?? e.endedTs
-        return launches.contains { $0 < start }
+    /// Never type into the tab you are typing in.
+    static func mustDefer(pane: String, focused: Set<String>, idle: Double) -> Bool {
+        focused.contains(pane) && idle < activeWindow
     }
 
-    static func command(_ template: String, _ e: RestoreEntry) -> String {
-        template.replacingOccurrences(of: "{id}", with: e.sessionId)
+    /// The command to type, or nil when the session ID is not a UUID.
+    static func command(_ template: String, _ e: RestoreEntry) -> String? {
+        ResumeRequest.isSessionID(e.sessionId) ? ResumeCommand.expand(template, id: e.sessionId) : nil
     }
 }
 
-/// Waits for a relaunched terminal to settle: the same pane list two looks in a row with every
-/// remembered pane at a shell, or the same list for 5 s (whatever runs there stays), or `limit` in all.
+/// Waits for a relaunched terminal to settle. The fast path, the same list twice with every
+/// remembered tab at its shell, needs at least one remembered tab present; otherwise the list must
+/// stay the same 5 s (10 s when none of them is there), and after `limit` it gives up.
 struct RestoreWait {
+    enum Result: Equatable {
+        case waiting
+        /// Remembered tabs are there; plan.
+        case settled
+        /// None of the remembered tabs came back; plan (they are not coming).
+        case unchanged
+        /// Never settled: a plan now would be premature, so nothing is decided.
+        case gaveUp
+    }
+
     let start: Double
-    var limit: Double = 30
+    let limit: Double
     private var last: [RestorePane]?
     private var since: Double = 0
 
@@ -142,18 +199,20 @@ struct RestoreWait {
         self.limit = limit
     }
 
-    mutating func settled(_ panes: [RestorePane]?, at t: Double, watching ids: Set<String>) -> Bool {
-        if t - start >= limit { return true }
-        guard let panes else { last = nil; return false }
-        if panes != last { last = panes; since = t; return false }
-        guard t - start >= 1.5 else { return false }
-        return panes.filter { ids.contains($0.id) }.allSatisfy(\.atShell) || t - since >= 5
+    mutating func look(_ panes: [RestorePane]?, at t: Double, watching ids: Set<String>) -> Result {
+        if t - start >= limit { return .gaveUp }
+        guard let panes else { last = nil; return .waiting }
+        if panes != last { last = panes; since = t; return .waiting }
+        guard t - start >= 1.5 else { return .waiting }
+        let watched = panes.filter { ids.contains($0.id) }
+        if watched.isEmpty { return t - since >= 10 ? .unchanged : .waiting }
+        return watched.allSatisfy(\.atShell) || t - since >= 5 ? .settled : .waiting
     }
 }
 
 // MARK: - The coordinator
 
-/// Notices a terminal relaunching (or already running when the app starts), waits for its tabs to
+/// Notices a terminal relaunching (or launched just before Claws started), waits for its tabs to
 /// settle, and offers once to resume the sessions those tabs were running. Main thread; terminal
 /// I/O on `Terminals.worker`.
 final class Restorer {
@@ -164,23 +223,38 @@ final class Restorer {
     var commandOverride: String?
     /// No windows (the CLI): report the question instead of asking it.
     var headless = false
+    /// `--restore-run` without `--yes`: decide and report, never write the ledger or type.
+    var readOnly = false
     /// Also print the log lines (the CLI).
     var echo = false
-    private(set) var ledger = RestoreLedger.load()
+    /// Seconds since your last keystroke or pointer move; tests replace it (`--assume-active`).
+    var idleSeconds: () -> Double = { Presence.idleSeconds }
+    /// When Claws started: a terminal launched up to 2 minutes earlier still counts as observed.
+    let startedAt = Date().timeIntervalSince1970
+    /// Terminal processes seen launching while Claws ran.
+    private var sawLaunch = Set<pid_t>()
     /// Adapters with a restore under way: one at a time, one question at a time.
     private var underWay = Set<String>()
+    /// Bumped when a terminal quits: its settle wait and deferred typing stop.
+    private var generation: [String: Int] = [:]
     private var prompt: RestorePrompt?
     private var promptFor: String?
     private let terminals = Terminals.shared
 
     var adapters: [TerminalAdapter] { terminals.adapters.filter(\.restoresPanes) }
+    var isIdle: Bool { underWay.isEmpty }
 
     func start() {
-        if ledger.expire(now: Date().timeIntervalSince1970) { ledger.save() }
+        let now = Date().timeIntervalSince1970
+        write("forgot on start") { l in
+            l.expire(now: now)
+            l.remove { RestorePlan.hostStayed($0, now: now, alive: ProcInfo.isAlive) }
+        }
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            guard let self, let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier else { return }
-            for a in self.adapters where a.appBundleID == id {
+            guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            for a in self.adapters where a.appBundleID == app.bundleIdentifier {
+                self.sawLaunch.insert(app.processIdentifier)
                 // A quick quit and relaunch (an update's restart) can beat the old sessions' SessionEnd
                 // to the ledger: with nothing remembered yet, look once more a moment later.
                 if !self.begin(a, why: "launched") {
@@ -189,25 +263,27 @@ final class Restorer {
             }
         }
         nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            guard let self, let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier,
-                  let a = self.adapters.first(where: { $0.appBundleID == id }), self.promptFor == a.id else { return }
-            // It quit with the question up: its tabs come back at the next launch, and so does the question.
-            self.prompt?.close()
-            self.prompt = nil
-            self.promptFor = nil
-            self.underWay.remove(a.id)
+            guard let self, let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier else { return }
+            for a in self.adapters where a.appBundleID == id {
+                self.generation[a.id, default: 0] += 1
+                self.underWay.remove(a.id)
+                if self.promptFor == a.id {
+                    // It quit with the question up: that launch was their chance.
+                    self.prompt?.close()
+                    self.prompt = nil
+                    self.promptFor = nil
+                }
+            }
         }
-        for a in adapters where running(a) != nil { begin(a, why: "running") }
+        for a in adapters where running(a) != nil { begin(a, why: "was running when Claws started") }
     }
 
-    /// The CLI's `--restore-run`: as if each restoring terminal that runs had just launched.
+    /// The CLI's `--restore-run`: what the app does when a terminal launches, for each one running.
     func restoreNow() -> Bool {
         var any = false
         for a in adapters where running(a) != nil { any = begin(a, why: "asked to restore") || any }
         return any
     }
-
-    var isIdle: Bool { underWay.isEmpty }
 
     func running(_ a: TerminalAdapter) -> NSRunningApplication? {
         guard let b = a.appBundleID else { return nil }
@@ -218,73 +294,72 @@ final class Restorer {
 
     /// Sessions that ended with their tab: kept until their terminal reopens it.
     func remember(_ entries: [RestoreEntry]) {
-        guard !entries.isEmpty else { return }
-        entries.forEach { ledger.add($0) }
-        ledger.save()
-        log("remembered " + entries.map { "\($0.sessionId.prefix(8)) (\($0.reason), pane \($0.pane.prefix(8)))" }.joined(separator: ", "))
-        dropIfHostStayed(entries)
+        let valid = entries.filter { ResumeRequest.isSessionID($0.sessionId) && $0.hostPid != nil }
+        guard !valid.isEmpty, Settings.restore else { return }
+        write("remembered " + valid.map { "\($0.sessionId.prefix(8)) (\($0.reason), pane \($0.pane.prefix(8)))" }.joined(separator: ", ")) { l in
+            valid.forEach { l.add($0) }
+        }
+        // Cmd-W, or claude ending in a tab that stays open: the terminal outlives the session.
+        DispatchQueue.main.asyncAfter(deadline: .now() + RestorePlan.hostWindow + 0.5) { [weak self] in
+            let now = Date().timeIntervalSince1970
+            let stayed = valid.filter { RestorePlan.hostStayed($0, now: now, alive: ProcInfo.isAlive) }
+            guard !stayed.isEmpty else { return }
+            self?.write("forgot " + stayed.map { "\($0.sessionId.prefix(8))" }.joined(separator: ", ")
+                        + ": the terminal it ran in is still running (tab closed, or claude ended in an open tab)") { l in
+                l.remove { e in stayed.contains { $0.sessionId == e.sessionId && $0.endedTs == e.endedTs } }
+            }
+        }
     }
 
     /// Live sessions, on every reload: an entry whose session is back (resumed), or whose pane now
     /// hosts another session, is done.
     func live(_ sessions: [(id: String, adapter: String, pane: String?)]) {
-        guard !ledger.entries.isEmpty else { return }
+        let entries = RestoreLedger.load().entries
+        guard !entries.isEmpty else { return }
         let ids = Set(sessions.map(\.id))
         let panes = Set(sessions.compactMap { s in s.pane.map { "\(s.adapter)|\($0)" } })
-        let gone = ledger.entries.filter { ids.contains($0.sessionId) || panes.contains("\($0.adapter)|\($0.pane)") }
+        let gone = entries.filter { ids.contains($0.sessionId) || panes.contains("\($0.adapter)|\($0.pane)") }
         guard !gone.isEmpty else { return }
-        ledger.remove { e in gone.contains(e) }
-        ledger.save()
-        log("forgot " + gone.map { "\($0.sessionId.prefix(8))" + (ids.contains($0.sessionId) ? " (running again)" : " (its tab hosts another session)") }
-            .joined(separator: ", "))
-    }
-
-    /// How long after an entry is remembered its terminal must be gone. A quit takes a second or two
-    /// after its sessions end; a session reaped as vanished after a crash or a restart finds it gone.
-    static let hostWindow: Double = 12
-
-    /// Cmd-W, or claude ending (Ctrl-C, a crash, a kill) in a tab that stays open: the terminal that
-    /// hosted the session is still running a while later, so there is nothing to restore.
-    private func dropIfHostStayed(_ entries: [RestoreEntry]) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + Restorer.hostWindow) { [weak self] in
-            guard let self else { return }
-            let stayed = entries.filter { e in
-                self.terminals.adapter(id: e.adapter).map { RestorePlan.hostStayed(e, launches: self.launches($0)) } ?? false
-            }
-            guard self.ledger.remove(where: { stayed.contains($0) }) else { return }
-            self.ledger.save()
-            self.log("forgot " + stayed.map { "\($0.sessionId.prefix(8))" }.joined(separator: ", ")
-                     + ": its terminal is still running (tab closed, or claude ended in an open tab)")
-        }
-    }
-
-    private func launches(_ a: TerminalAdapter) -> [Double] {
-        guard let b = a.appBundleID else { return [] }
-        return NSRunningApplication.runningApplications(withBundleIdentifier: b)
-            .filter { !$0.isTerminated }.compactMap { $0.launchDate?.timeIntervalSince1970 }
+        write("forgot " + gone.map { "\($0.sessionId.prefix(8))" + (ids.contains($0.sessionId) ? " (running again)" : " (its tab hosts another session)") }
+            .joined(separator: ", ")) { l in l.remove { e in gone.contains { $0.sessionId == e.sessionId } } }
     }
 
     // The restore itself.
 
     @discardableResult
     private func begin(_ a: TerminalAdapter, why: String) -> Bool {
-        guard Settings.restore, !underWay.contains(a.id) else { return false }
+        guard Settings.restore, !underWay.contains(a.id), let app = running(a), let at = app.launchDate?.timeIntervalSince1970 else { return false }
         tracker?.reapNow()
-        if ledger.expire(now: Date().timeIntervalSince1970) { ledger.save() }
-        let ids = Set(ledger.entries.filter { $0.adapter == a.id }.map(\.pane))
-        guard !ids.isEmpty else { return false }
+        let mine = RestoreLedger.load().entries.filter { $0.adapter == a.id }
+        guard !mine.isEmpty else { return false }
+        let launch = RestorePlan.Launch(at: at, observed: RestorePlan.observed(launchAt: at, sawLaunch: sawLaunch.contains(app.processIdentifier),
+                                                                               startedAt: startedAt))
+        guard launch.observed else {
+            // Claws was not there when this terminal started: its tabs have been yours since.
+            let spent = mine.filter { $0.endedTs < at }
+            if !spent.isEmpty { spend(spent, why: "\(a.name) launched before Claws could restore its tabs") }
+            return true
+        }
+        let gen = generation[a.id, default: 0] + 1
+        generation[a.id] = gen
         underWay.insert(a.id)
         log("\(a.name) \(why): waiting for its tabs to settle")
+        let ids = Set(mine.map(\.pane))
         var wait = RestoreWait(start: Date().timeIntervalSince1970)
         func look() {
             terminals.worker.run {
                 if let b = a.scriptedBundleID { Automation.refresh(b) }
                 let panes = self.permitted(a) ? a.restorablePanes() : nil
                 DispatchQueue.main.async {
-                    if wait.settled(panes, at: Date().timeIntervalSince1970, watching: ids) {
-                        self.plan(a, panes)
-                    } else {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() }
+                    guard self.generation[a.id] == gen else { return }
+                    switch wait.look(panes, at: Date().timeIntervalSince1970, watching: ids) {
+                    case .waiting:
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if self.generation[a.id] == gen { look() } }
+                    case .gaveUp:
+                        self.log("\(a.name): its tabs never settled (or it may not be scripted); nothing decided")
+                        self.underWay.remove(a.id)
+                    case .settled, .unchanged:
+                        self.plan(a, panes ?? [], launch: launch, gen: gen)
                     }
                 }
             }
@@ -297,78 +372,122 @@ final class Restorer {
         a.scriptedBundleID.map { Automation.cached($0) == .granted } ?? true
     }
 
-    private func plan(_ a: TerminalAdapter, _ panes: [RestorePane]?) {
+    private func hostAlive(_ e: RestoreEntry) -> Bool? {
+        e.hostPid.map { ProcInfo.isAlive(pid: $0, start: e.hostStart) }
+    }
+
+    private func plan(_ a: TerminalAdapter, _ panes: [RestorePane], launch: RestorePlan.Launch, gen: Int) {
         // A session whose process vanished without SessionEnd joins the ledger now, not in 10 s.
         tracker?.reapNow()
-        guard let panes else {
-            log("\(a.name): could not list its tabs (not allowed, or older than 1.4); trying again at its next launch")
-            underWay.remove(a.id)
-            return
-        }
         let now = Date().timeIntervalSince1970
-        let launched = running(a)?.launchDate?.timeIntervalSince1970
         var ready: [RestoreEntry] = []
-        var spent = Set<String>()
-        for e in ledger.entries where e.adapter == a.id {
-            let v = RestorePlan.verdict(e, panes: panes, now: now)
+        var spent: [RestoreEntry] = []
+        for e in RestoreLedger.load().entries where e.adapter == a.id {
+            let v = RestorePlan.verdict(e, panes: panes, launch: launch, hostAlive: hostAlive(e), now: now)
             log("\(e.sessionId.prefix(8)) \"\(e.title)\": \(v.why)")
-            if v == .resume { ready.append(e) } else if RestorePlan.spent(e, v, launched: launched) { spent.insert(e.sessionId) }
+            if v == .resume { ready.append(e) } else if RestorePlan.spent(e, v, launch: launch) { spent.append(e) }
         }
-        if ledger.remove(where: { spent.contains($0.sessionId) }) { ledger.save() }
+        if !spent.isEmpty { spend(spent, why: "had their chance at this launch") }
         guard !ready.isEmpty else { underWay.remove(a.id); return }
-        if withoutAsking ?? Settings.restoreWithoutAsking { resume(a, ready); return }
+        // This launch is their one chance, asked or not.
+        let ids = Set(ready.map(\.sessionId))
+        write(nil) { l in for i in l.entries.indices where ids.contains(l.entries[i].sessionId) { l.entries[i].launch = launch.at } }
         let n = ready.count
         let text = n == 1 ? "\(a.name) reopened a tab that was running Claude Code. Resume it?"
             : "\(a.name) reopened \(n) tabs that were running Claude Code. Resume them?"
         let items = ready.map { (title: $0.title, folder: ($0.folder as NSString).lastPathComponent) }
-        if headless {
-            log("would ask: \(text) " + items.map { "\"\($0.title)\" in \($0.folder)" }.joined(separator: ", ") + " (pass --yes to resume)")
+        if withoutAsking ?? Settings.restoreWithoutAsking, !readOnly {
+            resume(a, ready, launch: launch, gen: gen, until: now + RestorePrompt.timeout)
+            return
+        }
+        if headless || readOnly {
+            log("would ask: \(text) " + items.map { "\"\($0.title)\" in \($0.folder)" }.joined(separator: ", "))
             underWay.remove(a.id)
             return
         }
         promptFor = a.id
-        prompt = RestorePrompt(message: text, items: items) { [weak self] resume, always in
+        prompt = RestorePrompt(message: text, items: items) { [weak self] answer in
             guard let self else { return }
             self.prompt = nil
             self.promptFor = nil
-            if resume {
+            switch answer {
+            case .resume(let always):
                 if always { Settings.set(true, Settings.Key.restoreWithoutAsking) }
-                self.resume(a, ready)
-            } else {
-                self.log("not now: dismissed \(ready.count)")
-                self.forget(ready)
+                self.resume(a, ready, launch: launch, gen: gen, until: Date().timeIntervalSince1970 + RestorePrompt.timeout)
+            case .notNow:
+                self.forget(ready, why: "not now")
+                self.underWay.remove(a.id)
+            case .timedOut:
+                self.log("no answer in 2 minutes: not asking again (they stay for this launch only)")
                 self.underWay.remove(a.id)
             }
         }
         prompt?.show()
     }
 
-    /// Types the resume command into each tab, checking it once more first: you may have used the
-    /// tab while the question was up.
-    private func resume(_ a: TerminalAdapter, _ ready: [RestoreEntry]) {
+    /// Types the resume command into each tab after checking everything once more (you may have used
+    /// the tab meanwhile). A tab that is in front while you are typing waits, until `deadline`.
+    private func resume(_ a: TerminalAdapter, _ ready: [RestoreEntry], launch: RestorePlan.Launch, gen: Int, until deadline: Double) {
         let template = commandOverride ?? Settings.resumeCommand
+        let front = Terminals.front
         terminals.worker.run {
             let panes = a.restorablePanes() ?? []
+            let focused = a.lookedAt(front: front)
+            let idle = self.idleSeconds()
             let now = Date().timeIntervalSince1970
             var lines: [String] = []
+            var done: [RestoreEntry] = []
+            var later: [RestoreEntry] = []
             for e in ready {
-                let v = RestorePlan.verdict(e, panes: panes, now: now)
-                guard v == .resume else { lines.append("\(e.sessionId.prefix(8)): not resumed, \(v.why)"); continue }
-                let ok = a.type(RestorePlan.command(template, e), into: e.pane)
+                let v = RestorePlan.verdict(e, panes: panes, launch: launch, hostAlive: self.hostAlive(e), now: now)
+                guard v == .resume, let command = RestorePlan.command(template, e) else {
+                    lines.append("\(e.sessionId.prefix(8)): not resumed, \(v == .resume ? "its session ID is not a UUID" : v.why)")
+                    done.append(e)
+                    continue
+                }
+                if RestorePlan.mustDefer(pane: e.pane, focused: focused, idle: idle) { later.append(e); continue }
+                let ok = a.type(command, into: e.pane)
                 lines.append("\(e.sessionId.prefix(8)): \(ok ? "resumed" : "typing failed") in pane \(e.pane.prefix(8))")
+                done.append(e)
             }
             DispatchQueue.main.async {
                 lines.forEach { self.log($0) }
-                // Resumed or not, these had their chance.
-                self.forget(ready)
+                if !done.isEmpty { self.forget(done, why: nil) }
+                guard self.generation[a.id] == gen else { return }
+                if !later.isEmpty {
+                    if Date().timeIntervalSince1970 < deadline {
+                        self.log("waiting: you are typing in the tab of " + later.map { "\($0.sessionId.prefix(8))" }.joined(separator: ", "))
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            if self.generation[a.id] == gen { self.resume(a, later, launch: launch, gen: gen, until: deadline) }
+                        }
+                        return
+                    }
+                    self.forget(later, why: "you kept typing in that tab")
+                }
                 self.underWay.remove(a.id)
             }
         }
     }
 
-    private func forget(_ entries: [RestoreEntry]) {
+    private func forget(_ entries: [RestoreEntry], why: String?) {
         let ids = Set(entries.map(\.sessionId))
-        if ledger.remove(where: { ids.contains($0.sessionId) }) { ledger.save() }
+        write(why.map { "forgot " + entries.map { "\($0.sessionId.prefix(8))" }.joined(separator: ", ") + ": " + $0 }) { l in
+            l.remove { ids.contains($0.sessionId) }
+        }
+    }
+
+    private func spend(_ entries: [RestoreEntry], why: String) {
+        forget(entries, why: why)
+    }
+
+    /// Every ledger change goes through here: under the lock, never in a read-only run.
+    private func write(_ message: String?, _ change: (inout RestoreLedger) -> Void) {
+        if readOnly {
+            if let message { log("would have " + message) }
+            return
+        }
+        if RestoreLedger.update(Paths.restore, change) == nil { log("restore.json is locked by another process; skipped: \(message ?? "an update")"); return }
+        if let message { log(message) }
     }
 
     private func log(_ msg: String) {
@@ -380,13 +499,16 @@ final class Restorer {
 // MARK: - The question
 
 /// The one question a restore asks: a small floating panel that leaves the keyboard with the
-/// terminal you just reopened, and never blocks anything while it waits.
+/// terminal you just reopened, never blocks anything while it waits, and goes after 2 minutes.
 final class RestorePrompt: NSObject, NSWindowDelegate {
+    enum Answer { case resume(always: Bool), notNow, timedOut }
+    static let timeout: Double = 120
     private let panel: NSPanel
-    private var answer: ((_ resume: Bool, _ always: Bool) -> Void)?
+    private var answer: ((Answer) -> Void)?
+    private var timer: Timer?
 
     /// `items`: what Resume brings back, each session's title and folder name.
-    init(message: String, items: [(title: String, folder: String)], answer: @escaping (_ resume: Bool, _ always: Bool) -> Void) {
+    init(message: String, items: [(title: String, folder: String)], answer: @escaping (Answer) -> Void) {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
                         styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
@@ -397,9 +519,12 @@ final class RestorePrompt: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        let host = NSHostingView(rootView: RestorePromptView(message: message, items: items) { [weak self] r, a in self?.finish(r, a) })
+        let host = NSHostingView(rootView: RestorePromptView(message: message, items: items) { [weak self] resume, always in
+            self?.finish(resume ? .resume(always: always) : .notNow)
+        })
         panel.contentView = host
         panel.setContentSize(host.fittingSize)
+        timer = Timer.scheduledTimer(withTimeInterval: RestorePrompt.timeout, repeats: false) { [weak self] _ in self?.finish(.timedOut) }
     }
 
     func show() {
@@ -410,21 +535,24 @@ final class RestorePrompt: NSObject, NSWindowDelegate {
     /// Without an answer (the terminal quit meanwhile).
     func close() {
         answer = nil
+        timer?.invalidate()
         panel.close()
     }
 
-    private func finish(_ resume: Bool, _ always: Bool) {
-        let a = answer
+    private func finish(_ a: Answer) {
+        let f = answer
         answer = nil
+        timer?.invalidate()
         panel.close()
-        a?(resume, always)
+        f?(a)
     }
 
     /// The close button means Not Now.
     func windowWillClose(_ notification: Notification) {
-        let a = answer
+        let f = answer
         answer = nil
-        a?(false, false)
+        timer?.invalidate()
+        f?(.notNow)
     }
 }
 
@@ -479,9 +607,23 @@ enum RestoreCLI {
         // Each step as it happens, also when the output goes to a file.
         setvbuf(stdout, nil, _IOLBF, 0)
         _ = NSApplication.shared
+        // Tests: you count as typing for this many seconds, then as away.
+        if let s = option("--assume-active", args).flatMap(Double.init) {
+            let until = Date().addingTimeInterval(s)
+            Restorer.shared.idleSeconds = { Date() < until ? 0 : 3600 }
+        }
     }
 
-    /// The ledger, and for each restoring terminal that runs: what a restore would do with each entry.
+    /// `--watch` writes the ledger and app state as the app does: only into a data folder of its own.
+    static func isScratchHome(_ env: [String: String]) -> Bool {
+        guard let h = env["CLAWS_HOME"], !h.isEmpty else { return false }
+        let real = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Claws for Concern").standardizedFileURL.path
+        return URL(fileURLWithPath: h).standardizedFileURL.path != real
+    }
+
+    /// The ledger, and for each restoring terminal that runs: what a restore would do with each
+    /// entry now. Reads only.
     static func status(_ args: [String]) -> Int32 {
         setUp(args)
         let now = Date().timeIntervalSince1970
@@ -489,7 +631,8 @@ enum RestoreCLI {
         let ledger = RestoreLedger.load()
         print("\n\(Paths.restore.path): \(ledger.entries.count) session\(ledger.entries.count == 1 ? "" : "s")")
         for e in ledger.entries.sorted(by: { $0.endedTs > $1.endedTs }) {
-            print("  \(e.sessionId.prefix(8))  \(e.reason.padding(toLength: 9, withPad: " ", startingAt: 0)) ended \(age(now - e.endedTs)) ago  \(e.adapter) pane \(e.pane.prefix(8))  \(e.folder)  \"\(e.title)\"")
+            let host = e.hostPid.map { "host \($0) \(ProcInfo.isAlive(pid: $0, start: e.hostStart) ? "running" : "gone")" } ?? "host unknown"
+            print("  \(e.sessionId.prefix(8))  \(e.reason.padding(toLength: 9, withPad: " ", startingAt: 0)) ended \(age(now - e.endedTs)) ago  \(host)  \(e.adapter) pane \(e.pane.prefix(8))  \(e.folder)  \"\(e.title)\"")
         }
         let files = (try? FileManager.default.contentsOfDirectory(at: Paths.sessions, includingPropertiesForKeys: nil)) ?? []
         let ended = files.filter { $0.pathExtension == "json" }.compactMap(SessionState.load).filter { $0.endedTs != nil }
@@ -500,41 +643,51 @@ enum RestoreCLI {
             let b = a.appBundleID ?? "?"
             print("\n\(a.name) (\(b)):")
             print("  " + (a.restoreProblem().map { "! " + $0 } ?? "reopens its tabs after quitting"))
-            guard let app = Restorer.shared.running(a) else { print("  not running"); continue }
+            guard let app = Restorer.shared.running(a), let at = app.launchDate?.timeIntervalSince1970 else { print("  not running"); continue }
             Automation.refresh(b)
             guard Automation.cached(b) == .granted else { print("  not allowed to script it (Automation)"); continue }
-            guard let panes = a.restorablePanes() else { print("  could not list its tabs (needs Ghostty 1.4 or later)"); continue }
-            let since = app.launchDate.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .medium) } ?? "?"
-            print("  running since \(since), \(panes.count) terminal\(panes.count == 1 ? "" : "s")")
+            guard let panes = a.restorablePanes() else { print("  could not list its tabs (needs Ghostty 1.4 or later, done launching)"); continue }
+            let launch = RestorePlan.Launch(at: at, observed: RestorePlan.observed(launchAt: at, sawLaunch: false, startedAt: now))
+            print("  pid \(app.processIdentifier), launched \(age(now - at)) ago (\(launch.observed ? "within" : "more than") 2 minutes before this check), \(panes.count) terminal\(panes.count == 1 ? "" : "s")")
             for p in panes {
-                print("    \(p.id.prefix(8))  \((p.atShell ? "shell" : "busy").padding(toLength: 6, withPad: " ", startingAt: 0)) \(p.foreground.padding(toLength: 10, withPad: " ", startingAt: 0)) \(p.cwd)")
+                let started = p.started.map { String(format: "%+.0f s", $0 - at) } ?? "?"
+                print("    \(p.id.prefix(8))  \(p.foreground.padding(toLength: 8, withPad: " ", startingAt: 0)) started \(started)  \(p.problem ?? "login shell at its prompt")  \(p.cwd ?? "?")")
             }
             for e in ledger.entries where e.adapter == a.id {
-                print("  \(e.sessionId.prefix(8)) -> \(RestorePlan.verdict(e, panes: panes, now: now).why)")
+                let alive = e.hostPid.map { ProcInfo.isAlive(pid: $0, start: e.hostStart) }
+                print("  \(e.sessionId.prefix(8)) -> \(RestorePlan.verdict(e, panes: panes, launch: launch, hostAlive: alive, now: now).why)")
             }
         }
         return 0
     }
 
-    /// The app's restore, now, for each restoring terminal that runs. `--yes`: resume without
-    /// asking (else report what it would ask). `--command TEMPLATE`: type this instead of Settings'.
+    /// The app's restore, now, for each restoring terminal that runs (only within 2 minutes of its
+    /// launch, like the app). `--yes`: type without asking. Without it nothing is written or typed.
+    /// `--command TEMPLATE`: type this instead of Settings'.
     static func run(_ args: [String]) -> Int32 {
         setUp(args)
         let r = Restorer.shared
         r.headless = true
         r.echo = true
-        r.withoutAsking = args.contains("--yes") ? true : nil
+        let yes = args.contains("--yes")
+        r.readOnly = !yes
+        r.withoutAsking = yes ? true : nil
         r.commandOverride = option("--command", args)
         guard r.restoreNow() else { print("Nothing to restore (no remembered sessions for a running terminal, or Restore is off)."); return 0 }
-        let deadline = Date().addingTimeInterval(45)
+        let deadline = Date().addingTimeInterval(RestorePrompt.timeout + 60)
         while !r.isIdle, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
         return r.isIdle ? 0 : 1
     }
 
     /// The tracker and restore without the UI (no Clawds, menu, recaps, sounds or notifications),
     /// for a restore round trip: it maps sessions to tabs, remembers the ones that end with their
-    /// tab, and restores on relaunch. Prints mapping changes and restore steps.
+    /// terminal, and restores on relaunch. Prints mapping changes and restore steps. Needs a data
+    /// folder of its own (CLAWS_HOME).
     static func watch(_ args: [String]) -> Int32 {
+        guard isScratchHome(ProcessInfo.processInfo.environment) else {
+            print("--watch writes restore and app state: set CLAWS_HOME to a folder of its own, not the app's.")
+            return 2
+        }
         setUp(args)
         let seconds = Double(option("--seconds", args) ?? "") ?? 600
         let tracker = Tracker(headless: true)

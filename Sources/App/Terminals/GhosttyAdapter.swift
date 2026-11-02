@@ -19,8 +19,9 @@ final class GhosttyAdapter: TerminalAdapter {
     /// Written on the worker, read on the main thread by `paneID(for:)`.
     private var ttys = TTYMap()
     private let lock = NSLock()
-    /// The Ghostty process that answered the old listing but not the one with `tty` (Ghostty 1.3).
-    private var noTTY: pid_t?
+    /// Whether this Ghostty process reports `tty` and `pid` (worker only).
+    private var ttySupport: (pid: pid_t, ok: Bool)?
+    private var problemCache: (stamp: String, problem: String?)?
 
     init(bundleID: String = GhosttyAdapter.bundleID) {
         app = bundleID
@@ -52,28 +53,43 @@ final class GhosttyAdapter: TerminalAdapter {
 
     func panes() -> [PaneInfo] { list() ?? [] }
 
-    /// Every terminal, or nil if Ghostty did not answer. Each listing refreshes the tty map.
+    /// Ghostty, running and done launching. Never script it otherwise: telling an app that is not
+    /// running anything launches it.
+    private var ready: NSRunningApplication? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: app).first { !$0.isTerminated && $0.isFinishedLaunching }
+    }
+
+    /// Whether this Ghostty process reports `tty` and `pid`: from its version (1.4+); nil while
+    /// unknown, which a listing then settles. Never decided by a timeout.
+    private func hasTTY(_ g: NSRunningApplication) -> Bool? {
+        if let s = ttySupport, s.pid == g.processIdentifier { return s.ok }
+        guard let url = g.bundleURL,
+              let v = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist"))?["CFBundleShortVersionString"] as? String,
+              !v.isEmpty else { return nil }
+        ttySupport = (g.processIdentifier, !GhosttyAdapter.isBefore(v, [1, 4]))
+        return ttySupport?.ok
+    }
+
+    /// Every terminal, or nil if Ghostty did not answer (or is not running). Each listing refreshes
+    /// the tty map.
     func list() -> [PaneInfo]? {
-        let now = Date().timeIntervalSince1970
-        if !ttyUnsupported, let l = listing(withTTY: true) {
-            lock.lock(); ttys.list(l, at: now); lock.unlock()
-            return l
-        }
-        guard let l = listing(withTTY: false) else { return nil }
-        if !ttyUnsupported {
-            noTTY = runningPID
+        guard let g = ready else { return nil }
+        if hasTTY(g) != false {
+            let (l, error) = listing(withTTY: true)
+            if let l {
+                ttySupport = (g.processIdentifier, true)
+                lock.lock(); ttys.list(l, at: Date().timeIntervalSince1970); lock.unlock()
+                return l
+            }
+            // Only a term its dictionary lacks means Ghostty 1.3; a timeout or a busy app means nothing.
+            guard error == Script.undefinedTerm else { return nil }
+            ttySupport = (g.processIdentifier, false)
             AppLog.write("ghostty: this version reports no tty; learning tabs instead")
         }
-        return l
+        return listing(withTTY: false).panes
     }
 
-    private var runningPID: pid_t? {
-        NSRunningApplication.runningApplications(withBundleIdentifier: app).first?.processIdentifier
-    }
-
-    private var ttyUnsupported: Bool { noTTY != nil && noTTY == runningPID }
-
-    private func listing(withTTY: Bool) -> [PaneInfo]? {
+    private func listing(withTTY: Bool) -> (panes: [PaneInfo]?, error: Int?) {
         let props = withTTY ? "{id, working directory, name, tty, pid}" : "{id, working directory, name}"
         let src = """
         with timeout of 3 seconds
@@ -81,13 +97,14 @@ final class GhosttyAdapter: TerminalAdapter {
         end timeout
         """
         let columns = withTTY ? 5 : 3
-        guard let d = Script.run(src, cacheKey: "ghostty.all.\(withTTY).\(app)"), d.numberOfItems == columns else { return nil }
+        let r = Script.attempt(src, cacheKey: "ghostty.all.\(withTTY).\(app)")
+        guard let d = r.result, d.numberOfItems == columns else { return (nil, r.error) }
         let cols = (1...columns).compactMap { d.atIndex($0) }
-        guard cols.count == columns else { return nil }
+        guard cols.count == columns else { return (nil, nil) }
         let n = cols[0].numberOfItems
-        guard cols.allSatisfy({ $0.numberOfItems == n }) else { return nil }
-        guard n > 0 else { return [] }
-        return (1...n).compactMap { i in
+        guard cols.allSatisfy({ $0.numberOfItems == n }) else { return (nil, nil) }
+        guard n > 0 else { return ([], nil) }
+        return ((1...n).compactMap { i in
             guard let id = cols[0].atIndex(i)?.stringValue else { return nil }
             var p = PaneInfo(id: id, cwd: cols[1].atIndex(i)?.stringValue ?? "", name: cols[2].atIndex(i)?.stringValue ?? "")
             if withTTY {
@@ -96,7 +113,7 @@ final class GhosttyAdapter: TerminalAdapter {
                 p.pid = pid > 0 ? pid : nil
             }
             return p
-        }
+        }, nil)
     }
 
     func focus(paneID: String, session: SessionState) -> Bool {
@@ -118,22 +135,28 @@ final class GhosttyAdapter: TerminalAdapter {
 
     // MARK: Restore
 
-    /// Ghostty 1.4+ only: whether a shell is idle in a terminal comes from its foreground `pid`.
+    /// Ghostty 1.4+ only (`tty` and `pid`): whether the tab's own shell waits at its prompt comes from
+    /// the kernel's view of its foreground process.
     func restorablePanes() -> [RestorePane]? {
-        guard let l = list(), !ttyUnsupported else { return nil }
-        return l.map { RestorePane.from(id: $0.id, cwd: $0.cwd, foregroundPid: $0.pid) }
+        guard let g = ready, let l = list(), hasTTY(g) == true else { return nil }
+        return l.map { RestorePane.from(id: $0.id, tty: $0.tty, foregroundPid: $0.pid, hostPid: g.processIdentifier) }
     }
 
     func type(_ command: String, into paneID: String) -> Bool {
-        Script.run(GhosttyAdapter.typeScript(app: app, terminal: paneID, command: command))?.stringValue == "ok"
+        guard ready != nil else { return false }
+        return Script.run(GhosttyAdapter.typeScript(app: app, terminal: paneID, command: command))?.stringValue == "ok"
     }
 
+    /// Ctrl-U first (pressed and released) clears anything already on the line, then the command
+    /// as if pasted, then Return.
     static func typeScript(app: String, terminal: String, command: String) -> String {
         let safe = terminal.filter { $0.isHexDigit || $0 == "-" }
         return """
         with timeout of 3 seconds
           tell application id \(Script.quote(app))
             set t to terminal id "\(safe)"
+            send key "u" action press modifiers "control" to t
+            send key "u" action release modifiers "control" to t
             input text \(Script.quote(command)) to t
             send key "enter" to t
           end tell
@@ -144,17 +167,32 @@ final class GhosttyAdapter: TerminalAdapter {
 
     /// Ghostty brings its tabs back after quitting only with `window-save-state = always`; the
     /// default follows macOS's "Close windows when quitting an application", which is on by default.
+    /// `ghostty +show-config` runs again only when the version or a config file changes.
     func restoreProblem() -> String? {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app) else { return nil }
-        let info = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist"))
-        if let v = info?["CFBundleShortVersionString"] as? String, GhosttyAdapter.isBefore(v, [1, 4]) {
-            return "Restore needs Ghostty 1.4 or later to find the tabs it reopens (this is \(v))."
+        let version = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist"))?["CFBundleShortVersionString"] as? String
+        if let version, GhosttyAdapter.isBefore(version, [1, 4]) {
+            return "Restore needs Ghostty 1.4 or later to find the tabs it reopens (this is \(version))."
         }
+        let stamp = (version ?? "") + "|" + GhosttyAdapter.configFiles().map { f in
+            ((try? FileManager.default.attributesOfItem(atPath: f))?[.modificationDate] as? Date).map { "\($0.timeIntervalSince1970)" } ?? "-"
+        }.joined(separator: "|")
+        if let c = problemCache, c.stamp == stamp { return c.problem }
         let cli = url.appendingPathComponent("Contents/MacOS/ghostty").path
         guard let r = Command.run(cli, ["+show-config", "--no-pager"], timeout: 3), r.status == 0 else { return nil }
         let value = GhosttyAdapter.saveState(r.out) ?? "default"
-        return value == "always" ? nil
+        let problem = value == "always" ? nil
             : "Ghostty reopens its tabs after quitting only with window-save-state = always in its config (it is \(value))."
+        problemCache = (stamp, problem)
+        return problem
+    }
+
+    /// Where Ghostty reads its config (files it includes with `config-file` are not watched).
+    static func configFiles() -> [String] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? "\(home)/.config"
+        let support = "\(home)/Library/Application Support/com.mitchellh.ghostty"
+        return ["\(xdg)/ghostty/config", "\(xdg)/ghostty/config.ghostty", "\(support)/config", "\(support)/config.ghostty"]
     }
 
     /// `window-save-state` from `ghostty +show-config` (which prints only what differs from the default).
@@ -177,7 +215,9 @@ final class GhosttyAdapter: TerminalAdapter {
     }
 
     private func focusedTerminal() -> PaneInfo? {
-        if !ttyUnsupported, let s = Script.run(focusedScript(withTTY: true), cacheKey: "ghostty.focused.true.\(app)")?.stringValue {
+        guard let g = ready else { return nil }
+        if hasTTY(g) == true {
+            guard let s = Script.run(focusedScript(withTTY: true), cacheKey: "ghostty.focused.true.\(app)")?.stringValue else { return nil }
             let p = s.components(separatedBy: "\t")
             return p.count >= 4 ? PaneInfo(id: p[0], cwd: p[1], name: p[3...].joined(separator: "\t"), tty: p[2].isEmpty ? nil : p[2]) : nil
         }

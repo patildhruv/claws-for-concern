@@ -23,6 +23,9 @@ final class Tracker {
 
     private struct Meta: Codable {
         var terminalId: String?
+        /// `terminalId` came from the adapter outright (Ghostty's tty), not from learning: only such a
+        /// pane is restored into.
+        var exact: Bool?
         /// statusTs of the last alert you saw or dismissed; a Clawd shows only for newer ones.
         var ackTs: Double = 0
         var promptSeen: Double = 0
@@ -325,31 +328,47 @@ final class Tracker {
     private func notePanes() {
         for (sid, s) in states {
             let a = terminals.adapter(for: s)
-            guard a.learnsPanes, let p = a.paneID(for: s), saved.meta[sid]?.terminalId != p else { continue }
-            assign(p, to: sid)
+            guard a.learnsPanes, let p = a.paneID(for: s), saved.meta[sid]?.terminalId != p || saved.meta[sid]?.exact != true else { continue }
+            assign(p, to: sid, exact: true)
         }
     }
 
-    /// When each learning adapter last listed its panes (epoch seconds).
+    /// The pane a restore may type into: named by the adapter outright, now or when last seen (Ghostty:
+    /// by tty), never a learned guess.
+    private func exactPane(_ s: SessionState) -> String? {
+        let a = terminals.adapter(for: s)
+        if let p = a.paneID(for: s) { return p }
+        guard let m = saved.meta[s.sessionId], m.exact == true else { return nil }
+        return m.terminalId
+    }
+
+    /// When each learning adapter last really listed its panes (epoch seconds, when the listing began).
     private var listedAt: [String: Double] = [:]
+    private var lastNewSessionMap = Date.distantPast
 
     /// A restore needs every session's pane, not only those with a Clawd: one listing for each
-    /// session that started since its terminal's panes were last listed and has no pane yet.
+    /// session that started since its terminal's panes were last listed and has no pane yet. Its own
+    /// throttle, so it never delays the mapping of a session with a Clawd.
     private func mapNewSessions() {
+        guard Date().timeIntervalSince(lastNewSessionMap) > 3 else { return }
         let new = states.values.filter { s in
             let (a, pane) = location(s)
             return pane == nil && a.learnsPanes && a.restoresPanes && (s.claudeStart ?? 0) > (listedAt[a.id] ?? 0)
         }
-        if !new.isEmpty { fallbackMap(only: new, learn: false) }
+        guard !new.isEmpty else { return }
+        lastNewSessionMap = Date()
+        listPanes(new, learn: false)
     }
 
-    private func assign(_ terminalId: String, to sid: String) {
+    private func assign(_ terminalId: String, to sid: String, exact: Bool = false) {
         for (other, var m) in saved.meta where other != sid && m.terminalId == terminalId {
             m.terminalId = nil
+            m.exact = nil
             saved.meta[other] = m
         }
         var m = saved.meta[sid] ?? Meta()
         m.terminalId = terminalId
+        m.exact = exact
         saved.meta[sid] = m
     }
 
@@ -364,20 +383,26 @@ final class Tracker {
     /// Learning adapters, for sessions that alert before we ever saw you type into them (for example,
     /// already running when the app started): list the panes, which on Ghostty 1.4 names each
     /// session's tab by tty, else match by folder and title (`learn`).
-    private func fallbackMap(force: Bool = false, only: [SessionState]? = nil, learn: Bool = true, then: (() -> Void)? = nil) {
+    private func fallbackMap(force: Bool = false, only: [SessionState]? = nil, then: (() -> Void)? = nil) {
         let unmapped = (only ?? alerts.filter { !$0.mapped }.compactMap { states[$0.sessionId] })
             .filter { terminals.adapter(for: $0).learnsPanes }
         guard !unmapped.isEmpty, force || Date().timeIntervalSince(lastFallbackMap) > 5 else { then?(); return }
         lastFallbackMap = Date()
+        listPanes(unmapped, learn: true, then: then)
+    }
+
+    private func listPanes(_ unmapped: [SessionState], learn: Bool, then: (() -> Void)? = nil) {
         let group = DispatchGroup()
         var changed = false
         for (aid, sessions) in Dictionary(grouping: unmapped, by: { terminals.adapter(for: $0).id }) {
             guard let a = terminals.adapter(id: aid) else { continue }
-            listedAt[aid] = Date().timeIntervalSince1970
+            let began = Date().timeIntervalSince1970
             group.enter()
             terminals.panes(a) { [weak self] panes in
                 defer { group.leave() }
+                // An empty answer is no listing (not running, not allowed, or no answer).
                 guard let self, !panes.isEmpty else { return }
+                self.listedAt[aid] = began
                 if sessions.contains(where: { a.paneID(for: $0) != nil }) { changed = true }
                 guard learn else { return }
                 let taken = Set(self.saved.meta.values.compactMap(\.terminalId))
@@ -521,11 +546,13 @@ final class Tracker {
         var keep: [RestoreEntry] = []
         var pending = Set<String>()
         for s in gone {
-            let (a, pane) = location(s)
+            let a = terminals.adapter(for: s)
+            let pane = exactPane(s)
             guard Tracker.removeSessionFile(s) else { pending.insert(s.sessionId); continue }
-            guard a.restoresPanes, let pane else { continue }
+            guard a.restoresPanes, let pane, s.hostPid != nil else { continue }
             keep.append(RestoreEntry(sessionId: s.sessionId, adapter: a.id, pane: pane, folder: s.rootCwd, title: title(for: s),
-                                     endedTs: s.endedTs ?? s.updatedTs, reason: s.endReason ?? "vanished", claudeStart: s.claudeStart))
+                                     endedTs: s.endedTs ?? s.updatedTs, reason: s.endReason ?? "vanished",
+                                     hostPid: s.hostPid, hostStart: s.hostStart))
         }
         restorer.remember(keep)
         return pending

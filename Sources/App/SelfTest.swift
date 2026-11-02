@@ -174,70 +174,133 @@ enum SelfTest {
                 && resumed?.endedTs == nil && resumed?.claudePid == 300)
         let saved = (try? JSONEncoder().encode(s)).map { String(decoding: $0, as: UTF8.self) } ?? ""
         check("hook: ended fields on disk", saved.contains("\"end_reason\":\"other\"") && saved.contains("\"ended_ts\":2"), saved)
+        var hosted: SessionState?
+        _ = HookEvent.apply(ev("SessionStart", ["source": "startup"]), to: &hosted, now: 1, pid: 100, pidStart: 5, host: (900, 0.5), isAlive: alive)
+        check("hook: records the terminal process the session runs under", hosted?.hostPid == 900 && hosted?.hostStart == 0.5)
+        check("hook: the terminal process of this test is found", ProcInfo.hostAncestor(of: getpid()).map { $0.ppid <= 1 } == true)
 
-        // The ledger.
-        func entry(_ sid: String, _ pane: String, _ ended: Double, folder: String = "/w") -> RestoreEntry {
-            RestoreEntry(sessionId: sid, adapter: "ghostty", pane: pane, folder: folder, title: "T \(sid)", endedTs: ended, reason: "other")
+        // The ledger: IDs, one entry per pane and session, expiry, the lock.
+        func uuid(_ n: Int) -> String { String(format: "%08d-0000-4000-8000-000000000000", n) }
+        func entry(_ n: Int, _ pane: String, _ ended: Double, folder: String = "/w/p", host: Int32? = 900) -> RestoreEntry {
+            RestoreEntry(sessionId: uuid(n), adapter: "ghostty", pane: pane, folder: folder, title: "T\(n)", endedTs: ended, reason: "other",
+                         hostPid: host, hostStart: 0.5)
         }
         var l = RestoreLedger()
-        [entry("a", "P1", 10), entry("b", "P2", 10), entry("c", "P1", 20), entry("d", "P2", 5)].forEach { l.add($0) }
-        check("ledger: one entry per pane, the last session to end there wins", l.entries.map(\.sessionId).sorted() == ["b", "c"],
-              "\(l.entries.map(\.sessionId))")
-        l.add(entry("b", "P3", 30))
-        check("ledger: one entry per session", l.entries.filter { $0.sessionId == "b" }.map(\.pane) == ["P3"])
+        [entry(1, "P1", 10), entry(2, "P2", 10), entry(3, "P1", 20), entry(4, "P2", 5)].forEach { l.add($0) }
+        check("ledger: one entry per pane, the last session to end there wins", l.entries.map(\.sessionId).sorted() == [uuid(2), uuid(3)])
+        l.add(entry(2, "P3", 30))
+        check("ledger: one entry per session", l.entries.filter { $0.sessionId == uuid(2) }.map(\.pane) == ["P3"])
         var old = l
         old.expire(now: 20 + RestoreLedger.maxAge + 1)
-        check("ledger: entries expire after 7 days", old.entries.map(\.sessionId) == ["b"])
-        let json = (try? JSONEncoder().encode(l)) ?? Data()
-        check("ledger: JSON round trip", (try? JSONDecoder().decode(RestoreLedger.self, from: json)) == l
-              && String(decoding: json, as: UTF8.self).contains("\"session_id\""))
-
-        // The safety rules, with a real folder reached through a symlink (/tmp is /private/tmp).
+        check("ledger: entries expire after 7 days", old.entries.map(\.sessionId) == [uuid(2)])
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent("claws-restore-\(getpid())")
-        let real = dir.appendingPathComponent("project"), link = dir.appendingPathComponent("link")
-        try? fm.createDirectory(at: real, withIntermediateDirectories: true)
-        try? fm.createSymbolicLink(at: link, withDestinationURL: real)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
-        let e = entry("s", "P", 100, folder: real.path)
-        func pane(_ id: String = "P", cwd: String? = nil, fg: String = "zsh", started: Double? = 200) -> RestorePane {
-            RestorePane(id: id, cwd: cwd ?? real.path, foreground: fg, atShell: RestorePane.isShell(fg), started: started)
-        }
-        func v(_ panes: [RestorePane], now: Double = 300) -> RestorePlan.Verdict { RestorePlan.verdict(e, panes: panes, now: now) }
-        check("restore: reopened tab, idle shell, same folder -> resume", v([pane("X"), pane()]) == .resume)
-        check("restore: the folder through a symlink is the same folder", v([pane(cwd: link.path)]) == .resume)
-        check("restore: no tab with that ID", v([pane("X")]) == .noPane)
-        check("restore: a program in front, not a shell", v([pane(fg: "vim")]) == .busy("vim"))
-        check("restore: a tab that stayed open (shell older than the end)", v([pane(started: 50)]) == .notReopened
-              && v([pane(started: nil)]) == .notReopened)
-        check("restore: another folder", v([pane(cwd: dir.path)]) == .otherFolder(dir.path))
-        check("restore: a folder that is gone", RestorePlan.verdict(entry("s", "P", 100, folder: real.path + "-gone"), panes: [pane()], now: 300)
-              != .resume)
-        check("restore: older than a week", v([pane()], now: 101 + RestoreLedger.maxAge) == .expired)
-        check("restore: shells", RestorePane.isShell("zsh") && RestorePane.isShell("-zsh") && RestorePane.isShell("-/bin/zsh")
+        let file = dir.appendingPathComponent("restore.json")
+        RestoreLedger.update(file) { $0 = l; $0.entries.append(RestoreEntry(sessionId: "x; rm -rf ~", adapter: "ghostty", pane: "P9", folder: "/w",
+                                                                           title: "bad", endedTs: 1, reason: "other")) }
+        check("ledger: a session ID that is not a UUID never loads", RestoreLedger.load(file) == l)
+        let held = Darwin.open(dir.appendingPathComponent("restore.lock").path, O_RDWR)
+        _ = flock(held, LOCK_EX)
+        let blocked = RestoreLedger.update(file) { $0.entries = [] }
+        flock(held, LOCK_UN)
+        close(held)
+        check("ledger: no change while another process holds restore.lock", blocked == nil && RestoreLedger.load(file).entries.count == 2)
+        check("ledger: changes under the lock otherwise", RestoreLedger.update(file) { $0.entries.removeFirst() }?.entries.count == 1
+              && RestoreLedger.load(file).entries.count == 1)
+        check("command: only for a UUID", RestorePlan.command("claude --resume {id}", entry(5, "P", 1)) == "claude --resume \(uuid(5))"
+              && RestorePlan.command("claude --resume {id}", RestoreEntry(sessionId: "$(touch x)", adapter: "ghostty", pane: "P", folder: "/w",
+                                                                            title: "", endedTs: 1, reason: "other")) == nil)
+
+        // Typing safety: only the tab's own login shell, alone in front.
+        let me = getuid()
+        let shell = RestorePane.Foreground(name: "zsh", uid: me, parentName: "login", parentPid: 50, pgid: 60, tpgid: 60, tty: "/dev/ttys003")
+        check("pane: the tab's login shell at its prompt", RestorePane.problem(shell, paneTTY: "/dev/ttys003", hostPid: 9) == nil)
+        var direct = shell
+        direct.parentName = "ghostty"; direct.parentPid = 9
+        check("pane: a shell the terminal started itself", RestorePane.problem(direct, paneTTY: "/dev/ttys003", hostPid: 9) == nil)
+        var script = shell
+        script.parentName = "zsh"; script.parentPid = 60
+        check("pane: a script waiting on read is refused (a shell, but not the tab's own)",
+              RestorePane.problem(script, paneTTY: "/dev/ttys003", hostPid: 9) != nil)
+        var vim = shell
+        vim.name = "vim"
+        var root = shell
+        root.uid = me &+ 1
+        var behind = shell
+        behind.tpgid = 61
+        check("pane: a program, another user's shell, a shell not in front, another tty are refused",
+              RestorePane.problem(vim, paneTTY: "/dev/ttys003", hostPid: 9) != nil && RestorePane.problem(root, paneTTY: "/dev/ttys003", hostPid: 9) != nil
+                && RestorePane.problem(behind, paneTTY: "/dev/ttys003", hostPid: 9) != nil
+                && RestorePane.problem(shell, paneTTY: "/dev/ttys004", hostPid: 9) != nil && RestorePane.problem(shell, paneTTY: nil, hostPid: 9) != nil)
+        check("pane: shells", RestorePane.isShell("zsh") && RestorePane.isShell("-zsh") && RestorePane.isShell("-/bin/zsh")
               && RestorePane.isShell("/opt/homebrew/bin/fish") && !RestorePane.isShell("vim") && !RestorePane.isShell("login")
               && !RestorePane.isShell("2.1.316"))
-        check("restore: the command", RestorePlan.command("claude --resume {id}", e) == "claude --resume s")
-        check("restore: a relaunch is each entry's one chance", RestorePlan.spent(e, .noPane, launched: 150)
-              && !RestorePlan.spent(e, .resume, launched: 150) && !RestorePlan.spent(e, .noPane, launched: 50)
-              && !RestorePlan.spent(e, .noPane, launched: nil))
-        var hosted = e
-        hosted.claudeStart = 60
-        check("restore: the terminal that hosted it still runs (Cmd-W, claude ended in an open tab)",
-              RestorePlan.hostStayed(hosted, launches: [50]) && RestorePlan.hostStayed(hosted, launches: [200, 10]))
-        check("restore: the terminal went away with it (quit, crash, restart)",
-              !RestorePlan.hostStayed(hosted, launches: []) && !RestorePlan.hostStayed(hosted, launches: [70])
-                && !RestorePlan.hostStayed(e, launches: [150]) && RestorePlan.hostStayed(e, launches: [99]))
 
+        // The rules: ended at 100, its terminal gone, Ghostty relaunched at 200 and seen launching.
+        let e = entry(7, "P", 100)
+        let launch = RestorePlan.Launch(at: 200, observed: true)
+        func pane(_ id: String = "P", cwd: String? = "/w/p", problem: String? = nil, started: Double? = 202) -> RestorePane {
+            RestorePane(id: id, tty: "/dev/ttys003", foreground: "zsh", started: started, cwd: cwd, problem: problem)
+        }
+        func v(_ e: RestoreEntry = e, _ panes: [RestorePane] = [pane()], launch: RestorePlan.Launch = launch, host: Bool? = false,
+               now: Double = 300) -> RestorePlan.Verdict {
+            RestorePlan.verdict(e, panes: panes, launch: launch, hostAlive: host, now: now)
+        }
+        check("rule: reopened tab, its login shell from this launch, same folder -> resume", v(e, [pane("X"), pane()]) == .resume)
+        check("rule (a): the terminal it ran in still runs", v(host: true) == .hostRunning && v(host: nil) == .noHost)
+        check("rule (b): this terminal was running before the session ended",
+              v(launch: RestorePlan.Launch(at: 90, observed: true)) == .notRelaunched)
+        check("rule (c): Claws did not see this launch", v(launch: RestorePlan.Launch(at: 200, observed: false)) == .launchMissed)
+        check("rule (c): observed = seen launching, or Claws started at most 2 minutes after it",
+              RestorePlan.observed(launchAt: 200, sawLaunch: true, startedAt: 9999) && RestorePlan.observed(launchAt: 200, sawLaunch: false, startedAt: 310)
+                && !RestorePlan.observed(launchAt: 200, sawLaunch: false, startedAt: 330) && !RestorePlan.observed(launchAt: 200, sawLaunch: false, startedAt: 100))
+        check("rule (d): the tab's shell did not start with the launch", v(e, [pane(started: 290)]) == .notFromLaunch
+              && v(e, [pane(started: 150)]) == .notFromLaunch && v(e, [pane(started: nil)]) == .notFromLaunch)
+        check("rule: no tab with that ID", v(e, [pane("X")]) == .noPane)
+        check("rule: not the login shell at its prompt", v(e, [pane(problem: "vim is running")]) == .busy("vim is running"))
+        check("rule: another folder, compared as the kernel reports it (no file system access)",
+              v(e, [pane(cwd: "/w/p/sub")]) == .otherFolder("/w/p/sub") && v(e, [pane(cwd: nil)]) == .otherFolder("unknown"))
+        check("rule: older than a week", v(now: 101 + RestoreLedger.maxAge) == .expired)
+        var offered = e
+        offered.launch = 150
+        check("rule: offered at an earlier launch, never again", v(offered) == .otherLaunch && RestorePlan.spent(offered, .otherLaunch, launch: launch))
+        offered.launch = 200
+        check("rule: still offered at the launch it was asked for", v(offered) == .resume)
+        check("rule: a settled look is the one chance of what ended before the launch", RestorePlan.spent(e, .noPane, launch: launch)
+              && RestorePlan.spent(e, .launchMissed, launch: launch) && !RestorePlan.spent(e, .resume, launch: launch)
+              && !RestorePlan.spent(entry(8, "P", 250), .hostRunning, launch: launch))
+        let mine = getpid(), myStart = ProcInfo.info(getpid())?.start
+        var live = entry(9, "P", 100, host: mine)
+        live.hostStart = myStart
+        var gone = live
+        gone.hostStart = (myStart ?? 0) - 1000
+        check("rule: a terminal still running 12 s after the end outlived the session (Cmd-W, claude ended in an open tab)",
+              RestorePlan.hostStayed(live, now: 113, alive: ProcInfo.isAlive) && !RestorePlan.hostStayed(live, now: 105, alive: ProcInfo.isAlive)
+                && !RestorePlan.hostStayed(gone, now: 113, alive: ProcInfo.isAlive))
+        check("rule: never type into the tab you are typing in", RestorePlan.mustDefer(pane: "P", focused: ["P"], idle: 1)
+              && !RestorePlan.mustDefer(pane: "P", focused: ["P"], idle: 4) && !RestorePlan.mustDefer(pane: "P", focused: ["Q"], idle: 0))
+
+        // Settling.
+        let starting = [pane(problem: "login is running")], ready = [pane()], other = [pane("X")]
         var w = RestoreWait(start: 0)
-        let busy = [pane(fg: "login")], idle = [pane()]
-        check("wait: a pane still starting is not settled", !w.settled(nil, at: 0.5, watching: ["P"]) && !w.settled(busy, at: 1, watching: ["P"])
-              && !w.settled(busy, at: 2, watching: ["P"]))
-        check("wait: settled once unchanged for 5 s, even if busy", w.settled(busy, at: 6.5, watching: ["P"]))
+        check("wait: a tab still starting is not settled", w.look(nil, at: 0.5, watching: ["P"]) == .waiting
+              && w.look(starting, at: 1, watching: ["P"]) == .waiting && w.look(starting, at: 2, watching: ["P"]) == .waiting)
+        check("wait: settled once unchanged for 5 s, even if busy", w.look(starting, at: 6.5, watching: ["P"]) == .settled)
         var w2 = RestoreWait(start: 0)
-        check("wait: settled on two equal looks with every pane at a shell", !w2.settled(idle, at: 1, watching: ["P"]) && w2.settled(idle, at: 2, watching: ["P"]))
-        var w3 = RestoreWait(start: 0, limit: 10)
-        check("wait: gives up at the limit", !w3.settled(nil, at: 9, watching: ["P"]) && w3.settled(nil, at: 10, watching: ["P"]))
+        check("wait: fast when the remembered tabs are there, at their shells",
+              w2.look(ready, at: 1, watching: ["P"]) == .waiting && w2.look(ready, at: 2, watching: ["P"]) == .settled)
+        var w3 = RestoreWait(start: 0)
+        check("wait: no fast path while none of the remembered tabs is there",
+              w3.look(other, at: 1, watching: ["P"]) == .waiting && w3.look(other, at: 2, watching: ["P"]) == .waiting
+                && w3.look(other, at: 7, watching: ["P"]) == .waiting && w3.look(other, at: 11.5, watching: ["P"]) == .unchanged)
+        var w4 = RestoreWait(start: 0, limit: 10)
+        check("wait: gives up at the limit, deciding nothing", w4.look(nil, at: 9, watching: ["P"]) == .waiting
+              && w4.look(nil, at: 10, watching: ["P"]) == .gaveUp)
+        check("--watch: only with a data folder of its own", !RestoreCLI.isScratchHome([:]) && !RestoreCLI.isScratchHome(["CLAWS_HOME": ""])
+              && !RestoreCLI.isScratchHome(["CLAWS_HOME": FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support/Claws for Concern/"])
+              && RestoreCLI.isScratchHome(["CLAWS_HOME": dir.path]))
 
         // Ghostty: tabs by tty, its config, its version.
         var m = TTYMap()

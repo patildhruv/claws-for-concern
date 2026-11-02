@@ -35,11 +35,12 @@ defer { if lockFD >= 0 { flock(lockFD, LOCK_UN); close(lockFD) } }
 let url = Paths.sessions.appendingPathComponent("\(sid).json")
 var state = SessionState.load(url)
 let claude = ProcInfo.claudeAncestor(of: getppid())
+let host = claude.flatMap { ProcInfo.hostAncestor(of: $0.pid) }
 
 switch HookEvent.apply(json, to: &state, now: Date().timeIntervalSince1970,
                        pid: claude?.pid, pidStart: claude?.start, processCwd: claude.flatMap { ProcInfo.cwd($0.pid) },
                        termProgram: env["TERM_PROGRAM"], terminal: TerminalContext.capture(env),
-                       tty: claude.flatMap { ProcInfo.tty($0.pid) }) {
+                       tty: claude.flatMap { ProcInfo.tty($0.pid) }, host: host.map { ($0.pid, $0.start) }) {
 case .write:
     do { try state?.save(to: url) } catch { log("write \(sid): \(error)") }
 case .delete:

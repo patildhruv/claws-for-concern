@@ -18,7 +18,7 @@ enum HookEvent {
     /// `isAlive` is injectable for the self-test.
     static func apply(_ input: [String: Any], to state: inout SessionState?, now: Double,
                       pid: Int32? = nil, pidStart: Double? = nil, processCwd: String? = nil, termProgram: String? = nil,
-                      terminal: [String: String]? = nil, tty: String? = nil,
+                      terminal: [String: String]? = nil, tty: String? = nil, host: (pid: Int32, start: Double)? = nil,
                       isAlive: (Int32, Double?) -> Bool = ProcInfo.isAlive) -> Outcome {
         guard let event = input["hook_event_name"] as? String,
               let sid = input["session_id"] as? String, !sid.isEmpty else { return .ignore }
@@ -130,6 +130,7 @@ enum HookEvent {
         if let termProgram { s.termProgram = termProgram }
         if let terminal, !terminal.isEmpty { s.terminal = terminal }
         if let tty { s.tty = tty }
+        if let host { s.hostPid = host.pid; s.hostStart = host.start }
 
         // PostToolUse fires on every tool call; only touch the file when something changed.
         if state != nil, s == before { return .ignore }

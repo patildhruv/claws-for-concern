@@ -69,6 +69,10 @@ struct SessionState: Codable, Equatable {
     /// session is over, but the app may offer to resume it, and removes the file itself.
     var endReason: String?
     var endedTs: Double?
+    /// The terminal process the session runs under (the Claude process's ancestor directly under
+    /// launchd) and its start time: a restore needs it to have exited with the session.
+    var hostPid: Int32?
+    var hostStart: Double?
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id", cwd, rootCwd = "root_cwd", transcriptPath = "transcript_path"
@@ -76,6 +80,7 @@ struct SessionState: Codable, Equatable {
         case blockedKind = "blocked_kind", detail, lastMessage = "last_message", title
         case permissionMode = "permission_mode", claudePid = "claude_pid", claudeStart = "claude_start"
         case termProgram = "term_program", terminal, tty, endReason = "end_reason", endedTs = "ended_ts"
+        case hostPid = "host_pid", hostStart = "host_start"
     }
 
     /// One recorded terminal variable.
@@ -109,7 +114,16 @@ struct SessionState: Codable, Equatable {
 
 /// Process helpers shared by the hook (to find its Claude process) and the app (to spot dead sessions).
 enum ProcInfo {
-    struct Entry { let pid: Int32; let ppid: Int32; let name: String; let start: Double }
+    struct Entry {
+        let pid: Int32
+        let ppid: Int32
+        let name: String
+        let start: Double
+        var uid: uid_t = 0
+        /// Its process group, and the foreground process group of its controlling terminal.
+        var pgid: Int32 = 0
+        var tpgid: Int32 = 0
+    }
 
     static func info(_ pid: Int32) -> Entry? {
         var kp = kinfo_proc()
@@ -121,7 +135,20 @@ enum ProcInfo {
         }
         let tv = kp.kp_proc.p_starttime
         return Entry(pid: pid, ppid: kp.kp_eproc.e_ppid, name: name,
-                     start: Double(tv.tv_sec) + Double(tv.tv_usec) / 1e6)
+                     start: Double(tv.tv_sec) + Double(tv.tv_usec) / 1e6,
+                     uid: kp.kp_eproc.e_ucred.cr_uid, pgid: kp.kp_eproc.e_pgid, tpgid: kp.kp_eproc.e_tpgid)
+    }
+
+    /// The process directly under launchd that `pid` descends from: for a Claude process in a
+    /// Ghostty tab (claude ← shell ← login ← ghostty), Ghostty itself.
+    static func hostAncestor(of pid: Int32) -> Entry? {
+        var cur = pid
+        for _ in 0..<20 {
+            guard let e = info(cur) else { return nil }
+            if e.ppid <= 1 { return e }
+            cur = e.ppid
+        }
+        return nil
     }
 
     static func path(_ pid: Int32) -> String {
