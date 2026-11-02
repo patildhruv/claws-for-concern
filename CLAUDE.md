@@ -139,7 +139,8 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   test process only. Never send anything to the installed or running Claws from a test.
 - **`print` from the CLI to a file is block-buffered**: `--watch` looked silent. `RestoreCLI` line-buffers stdout.
 - **Telling an app that is not running anything launches it** (`tell application id …`). Every
-  restore query and typing call checks `isFinishedLaunching` first.
+  restore query and typing call checks `isFinishedLaunching` first, and every Ghostty script body is
+  wrapped in `if application id … is running` (that check off the main thread can lag a quit).
 
 ## Terminal adapters (`Sources/App/Terminals/`, guide: docs/adapters.md)
 
@@ -187,22 +188,34 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   (a) the session's terminal process is dead, (b) the running Ghostty launched after the session
   ended, (c) Claws saw that launch or started ≤ 2 min after it, (d) the tab's shell started ≤ 60 s
   after it; then the tab exists under the entry's pane ID, its foreground is the tab's own login
-  shell (`RestorePane.problem`: shell, our uid, parent `login` or Ghostty, pgid = tty's foreground
-  group, on the pane's tty), and that shell's kernel cwd equals the session's folder (no stat or
-  realpath on project folders).
-- An entry goes when its session runs again, when its pane hosts another session, when its terminal
-  still runs 12 s after the end (also checked at start), after the one launch it was offered at (or a
-  launch Claws missed), after Not Now or a resume, and after 7 days. A plan that never settled
-  decides nothing.
+  shell (`RestorePane.problem`: shell, our uid, its parent a root `login` started by this Ghostty or
+  Ghostty itself, pgid = tty's foreground group, on the pane's tty), and that shell's kernel cwd
+  equals the session's folder (no stat or realpath on project folders). A `read` inside the login
+  shell's own startup files cannot be told apart from its prompt: the shell itself is what waits.
+- **Each entry gets exactly one launch.** A launch that settles decides: resumed, refused, or not
+  reopened, everything that ended before it goes. A launch that never settles (gave up at 30 s,
+  e.g. no Automation grant) or reopens none of the remembered tabs decides nothing, but stamps those
+  entries with it (`launch`), so the next launch drops them. A launch Claws missed drops them at once.
+  Also gone: entries whose session runs again, whose pane hosts another session, whose terminal still
+  runs 12 s after the end (also checked at start), after Not Now or a resume, and after 7 days.
 - On Ghostty's launch (`isFinishedLaunching`; a quit cancels the wait through a generation number)
   `Restorer` polls once a second: the fast path (same list twice, every remembered tab at its shell)
   needs a remembered tab present; else unchanged 5 s (10 s with none present); gives up at 30 s. It
   asks in a non-activating floating panel (titles and folders, 5 then "and N more") that closes itself
-  after 2 minutes, unless `restoreWithoutAsking`. Typing: Ctrl-U (press + release), the command, Return;
-  a tab in front while you typed in the last 3 s waits (2 s steps, up to 2 minutes).
+  after 2 minutes, unless `restoreWithoutAsking`.
+- **Typing, one tab at a time, decided right before** (`RestorePlan.step`): list again (no answer:
+  wait), read the tab in front and the keyboard's idle time again (a tab in front while you typed in
+  the last 3 s waits; moving the pointer or clicking Resume does not count), and the script types
+  only if `pid of t` is still the checked shell: Ctrl-E, Ctrl-U (each press + release; bash and fish
+  kill only left of the cursor), the command, Return. Waiting tabs retry every 2 s for up to 2 minutes.
+- Every Ghostty script body sits inside `if application id … is running`: NSRunningApplication read
+  off the main thread can lag a quit, and telling a quit app anything relaunches it.
+- Ghostty's tty map stores the Ghostty pid with each sighting and answers only for the session's own
+  `host_pid` (a relaunched Ghostty reuses ttys); retiring prefers the stored `Meta.exact` pane.
 - `restore.json` changes only under `restore.lock` (flock, re-read inside); IDs must be UUIDs
   (`ResumeRequest.isSessionID`) on remember, load and typing. `--restore-run` without `--yes` writes
-  nothing; `--watch` refuses without its own `CLAWS_HOME`.
+  nothing, not even to claws.log; with `--yes` it refuses while Claws runs unless `CLAWS_HOME` is set.
+  `--watch` refuses without its own `CLAWS_HOME` (same device and inode counts as the same folder).
 
 ## Search (`Sources/Search/`, guide: docs/search.md)
 

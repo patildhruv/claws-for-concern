@@ -135,7 +135,7 @@ enum SelfTest {
             ("Ghostty (tty, pid)", "com.mitchellh.ghostty",
              "tell application id \"com.mitchellh.ghostty\" to get {id, working directory, name, tty, pid} of every terminal"),
             ("Ghostty (type a command)", "com.mitchellh.ghostty",
-             GhosttyAdapter.typeScript(app: "com.mitchellh.ghostty", terminal: "AB12-CD34", command: "claude --resume \"x\" \\ y")),
+             GhosttyAdapter.typeScript(app: "com.mitchellh.ghostty", terminal: "AB12-CD34", pid: 4242, command: "claude --resume \"x\" \\ y")),
             ("Terminal (jump)", "com.apple.Terminal", AppleTerminalAdapter.focusScript(tty: "/dev/ttys001")),
             ("iTerm2 (jump)", "com.googlecode.iterm2", ITermAdapter.focusScript(tty: "/dev/ttys001")),
         ] where NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil {
@@ -177,6 +177,8 @@ enum SelfTest {
         var hosted: SessionState?
         _ = HookEvent.apply(ev("SessionStart", ["source": "startup"]), to: &hosted, now: 1, pid: 100, pidStart: 5, host: (900, 0.5), isAlive: alive)
         check("hook: records the terminal process the session runs under", hosted?.hostPid == 900 && hosted?.hostStart == 0.5)
+        _ = HookEvent.apply(ev("UserPromptSubmit"), to: &hosted, now: 2, pid: 100, pidStart: 5, host: (100, 5), isAlive: alive)
+        check("hook: a Claude process with no terminal above it is never its own host", hosted?.hostPid == 900)
         check("hook: the terminal process of this test is found", ProcInfo.hostAncestor(of: getpid()).map { $0.ppid <= 1 } == true)
 
         // The ledger: IDs, one entry per pane and session, expiry, the lock.
@@ -215,11 +217,19 @@ enum SelfTest {
 
         // Typing safety: only the tab's own login shell, alone in front.
         let me = getuid()
-        let shell = RestorePane.Foreground(name: "zsh", uid: me, parentName: "login", parentPid: 50, pgid: 60, tpgid: 60, tty: "/dev/ttys003")
+        let shell = RestorePane.Foreground(name: "zsh", uid: me, parentName: "login", parentPid: 50, parentUID: 0, grandparentPid: 9,
+                                           pgid: 60, tpgid: 60, tty: "/dev/ttys003")
         check("pane: the tab's login shell at its prompt", RestorePane.problem(shell, paneTTY: "/dev/ttys003", hostPid: 9) == nil)
         var direct = shell
-        direct.parentName = "ghostty"; direct.parentPid = 9
+        direct.parentName = "ghostty"; direct.parentPid = 9; direct.grandparentPid = 1
         check("pane: a shell the terminal started itself", RestorePane.problem(direct, paneTTY: "/dev/ttys003", hostPid: 9) == nil)
+        var userLogin = shell
+        userLogin.parentUID = me
+        var otherLogin = shell
+        otherLogin.grandparentPid = 77
+        check("pane: a `login` that is not root, or not started by this terminal, is refused",
+              RestorePane.problem(userLogin, paneTTY: "/dev/ttys003", hostPid: 9) != nil
+                && RestorePane.problem(otherLogin, paneTTY: "/dev/ttys003", hostPid: 9) != nil)
         var script = shell
         script.parentName = "zsh"; script.parentPid = 60
         check("pane: a script waiting on read is refused (a shell, but not the tab's own)",
@@ -271,6 +281,32 @@ enum SelfTest {
         check("rule: a settled look is the one chance of what ended before the launch", RestorePlan.spent(e, .noPane, launch: launch)
               && RestorePlan.spent(e, .launchMissed, launch: launch) && !RestorePlan.spent(e, .resume, launch: launch)
               && !RestorePlan.spent(entry(8, "P", 250), .hostRunning, launch: launch))
+        check("rule: a terminal already running when the session ended spends it",
+              RestorePlan.spent(entry(8, "P", 250), .notRelaunched, launch: launch))
+        var stamped = entry(10, "Q", 100)
+        stamped.launch = 150
+        check("rule: a launch that settles nothing still stamps what ended before it (once), not what ended after",
+              RestorePlan.toStamp([e, entry(11, "R", 250), stamped], launch: launch).map(\.sessionId) == [e.sessionId])
+        var e2 = e
+        e2.launch = 200
+        check("rule: a stamped entry is dropped at the next launch", v(e2, launch: RestorePlan.Launch(at: 400, observed: true)) == .otherLaunch
+              && RestorePlan.spent(e2, .otherLaunch, launch: RestorePlan.Launch(at: 400, observed: true)))
+
+        // One tab's turn, right before typing.
+        func step(_ panes: [RestorePane]?, focused: Set<String> = [], idle: Double = 60, id: RestoreEntry = e) -> RestorePlan.Step {
+            RestorePlan.step(id, panes: panes, launch: launch, hostAlive: false, now: 300, template: "claude --resume {id}",
+                             focused: focused, keyboardIdle: idle)
+        }
+        var withPid = pane()
+        withPid.pid = 4242
+        check("step: types into the checked shell, naming its pid",
+              step([withPid]) == .type(command: "claude --resume \(e.sessionId)", foreground: 4242))
+        check("step: no listing this time waits, it does not drop", step(nil) == .later)
+        check("step: you are typing in that tab: wait; it is in front but you are not typing: type",
+              step([withPid], focused: ["P"], idle: 1) == .later
+                && step([withPid], focused: ["P"], idle: 5) == .type(command: "claude --resume \(e.sessionId)", foreground: 4242))
+        check("step: the rules still drop", step([withPid], id: entry(12, "Z", 100)) == .drop(RestorePlan.Verdict.noPane.why)
+              && step([pane()]) == .drop("its shell is not known"))
         let mine = getpid(), myStart = ProcInfo.info(getpid())?.start
         var live = entry(9, "P", 100, host: mine)
         live.hostStart = myStart
@@ -298,20 +334,42 @@ enum SelfTest {
         var w4 = RestoreWait(start: 0, limit: 10)
         check("wait: gives up at the limit, deciding nothing", w4.look(nil, at: 9, watching: ["P"]) == .waiting
               && w4.look(nil, at: 10, watching: ["P"]) == .gaveUp)
-        check("--watch: only with a data folder of its own", !RestoreCLI.isScratchHome([:]) && !RestoreCLI.isScratchHome(["CLAWS_HOME": ""])
-              && !RestoreCLI.isScratchHome(["CLAWS_HOME": FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support/Claws for Concern/"])
-              && RestoreCLI.isScratchHome(["CLAWS_HOME": dir.path]))
+        let realHome = dir.appendingPathComponent("real-home"), alias = dir.appendingPathComponent("alias-home")
+        try? fm.createDirectory(at: realHome, withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(at: alias, withDestinationURL: realHome)
+        check("--watch: only with a data folder of its own, also through a symlink", !RestoreCLI.isScratchHome([:]) && !RestoreCLI.isScratchHome(["CLAWS_HOME": ""])
+              && !RestoreCLI.isScratchHome(["CLAWS_HOME": realHome.path + "/"], real: realHome)
+              && !RestoreCLI.isScratchHome(["CLAWS_HOME": alias.path], real: realHome)
+              && RestoreCLI.isScratchHome(["CLAWS_HOME": dir.path], real: realHome))
+        check("--restore-run --yes: not alongside a running Claws, unless on a data folder of its own",
+              !RestoreCLI.mayRunAlongside(appRunning: true, env: [:]) && RestoreCLI.mayRunAlongside(appRunning: false, env: [:])
+                && RestoreCLI.mayRunAlongside(appRunning: true, env: ["CLAWS_HOME": dir.path]))
 
         // Ghostty: tabs by tty, its config, its version.
         var m = TTYMap()
         m.list([PaneInfo(id: "A", cwd: "/w", name: "a", tty: "/dev/ttys001"), PaneInfo(id: "B", cwd: "/w", name: "b", tty: "/dev/ttys002"),
-                PaneInfo(id: "C", cwd: "/w", name: "c")], at: 100)
-        check("tty: a session maps to the tab on its tty", m.pane(tty: "/dev/ttys002", since: 90) == "B" && m.pane(tty: "/dev/ttys009", since: 90) == nil)
-        check("tty: a sighting older than the session's process is not trusted", m.pane(tty: "/dev/ttys001", since: 150) == nil)
-        m.saw(PaneInfo(id: "D", cwd: "/w", name: "d", tty: "/dev/ttys001"), at: 200)
-        check("tty: a reused tty points at its new tab", m.pane(tty: "/dev/ttys001", since: 150) == "D")
-        m.list([PaneInfo(id: "B", cwd: "/w", name: "b", tty: "/dev/ttys002")], at: 300)
-        check("tty: a full listing forgets closed tabs", m.pane(tty: "/dev/ttys001", since: 0) == nil && m.pane(tty: "/dev/ttys002", since: 250) == "B")
+                PaneInfo(id: "C", cwd: "/w", name: "c")], at: 100, host: 9)
+        check("tty: a session maps to the tab on its tty", m.pane(tty: "/dev/ttys002", since: 90, host: 9) == "B"
+              && m.pane(tty: "/dev/ttys009", since: 90, host: 9) == nil)
+        check("tty: a sighting older than the session's process is not trusted", m.pane(tty: "/dev/ttys001", since: 150, host: 9) == nil)
+        check("tty: only a sighting by the Ghostty the session runs under (a relaunched one reuses ttys)",
+              m.pane(tty: "/dev/ttys002", since: 90, host: 10) == nil && m.pane(tty: "/dev/ttys002", since: 90, host: nil) == nil)
+        m.saw(PaneInfo(id: "D", cwd: "/w", name: "d", tty: "/dev/ttys001"), at: 200, host: 9)
+        check("tty: a reused tty points at its new tab", m.pane(tty: "/dev/ttys001", since: 150, host: 9) == "D")
+        m.list([PaneInfo(id: "B", cwd: "/w", name: "b", tty: "/dev/ttys002")], at: 300, host: 9)
+        check("tty: a full listing forgets closed tabs", m.pane(tty: "/dev/ttys001", since: 0, host: 9) == nil
+              && m.pane(tty: "/dev/ttys002", since: 250, host: 9) == "B")
+        let scripts = [GhosttyAdapter.listingScript(app: "x.y", withTTY: true), GhosttyAdapter.listingScript(app: "x.y", withTTY: false),
+                       GhosttyAdapter.focusedScript(app: "x.y", withTTY: true), GhosttyAdapter.focusScript(app: "x.y", terminal: "AB"),
+                       GhosttyAdapter.typeScript(app: "x.y", terminal: "AB", pid: 7, command: "c"),
+                       GhosttyAdapter.newPaneScript(app: "x.y", in: "/w", typing: "c")]
+        check("ghostty: every script runs only while Ghostty is running (a quit one is never relaunched)",
+              scripts.allSatisfy { $0.hasPrefix("if application id \"x.y\" is running then") })
+        let typing = GhosttyAdapter.typeScript(app: "x.y", terminal: "AB", pid: 7, command: "c")
+        check("ghostty: typing checks the shell is still in front, then Ctrl-E, Ctrl-U, the command",
+              typing.contains("if (pid of t) is not 7 then return \"moved\"")
+                && typing.range(of: "send key \"e\"")!.lowerBound < typing.range(of: "send key \"u\"")!.lowerBound
+                && typing.range(of: "send key \"u\"")!.lowerBound < typing.range(of: "input text")!.lowerBound)
         check("ghostty: window-save-state from +show-config", GhosttyAdapter.saveState("font-size = 13\nwindow-save-state = always\n") == "always"
               && GhosttyAdapter.saveState("font-size = 13\n") == nil)
         check("ghostty: version check", GhosttyAdapter.isBefore("1.3.1", [1, 4]) && !GhosttyAdapter.isBefore("1.4.0", [1, 4])
@@ -320,7 +378,7 @@ enum SelfTest {
         // Telling an app that is not running anything launches it: these return before any script.
         let absent = GhosttyAdapter(bundleID: "io.example.claws.not-installed")
         check("ghostty: never scripted unless running and done launching",
-              absent.list() == nil && absent.restorablePanes() == nil && !absent.type("x", into: "AB12"))
+              absent.list() == nil && absent.restorablePanes() == nil && !absent.type("x", into: "AB12", ifForeground: 1))
         check("applescript: an undefined term is -2753 (Ghostty 1.3's missing tty), not a timeout",
               Script.attempt("return tty").error == Script.undefinedTerm)
     }

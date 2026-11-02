@@ -29,6 +29,8 @@ struct RestorePane: Equatable {
     let id: String
     /// The pane's terminal device, as the terminal reports it.
     let tty: String?
+    /// The foreground process: the shell a restore types into must still be in front when it types.
+    var pid: Int32? = nil
     /// The foreground process's name ("zsh", "vim"), "" if unknown.
     let foreground: String
     /// When the foreground process started (epoch seconds): a tab reopened by a relaunch has a shell
@@ -48,18 +50,23 @@ struct RestorePane: Equatable {
         var uid: uid_t
         var parentName: String
         var parentPid: Int32
+        /// The parent's owner and parent: `login` runs as root, started by the terminal.
+        var parentUID: uid_t
+        var grandparentPid: Int32
         var pgid: Int32
         var tpgid: Int32
         var tty: String?
     }
 
-    /// The tab's own login shell, alone in front: a shell, ours, started by `login` or by the
-    /// terminal itself, in the foreground of the pane's tty. A script waiting on `read` is a shell
-    /// too, but its parent is the login shell, so it is refused.
+    /// The tab's own login shell, alone in front: a shell, ours, started by the terminal itself or by
+    /// a root `login` the terminal started, in the foreground of the pane's tty. A script waiting on
+    /// `read` is a shell too, but its parent is the login shell, so it is refused. A `read` in the
+    /// login shell's own startup files cannot be told apart: the shell itself is what waits.
     static func problem(_ f: Foreground, paneTTY: String?, hostPid: Int32?, uid: uid_t = getuid()) -> String? {
         guard isShell(f.name) else { return "\(f.name.isEmpty ? "something" : f.name) is running" }
         guard f.uid == uid else { return "the shell belongs to another user" }
-        guard f.parentName == "login" || (hostPid != nil && f.parentPid == hostPid) else {
+        let fromLogin = f.parentName == "login" && f.parentUID == 0 && hostPid != nil && f.grandparentPid == hostPid
+        guard fromLogin || (hostPid != nil && f.parentPid == hostPid) else {
             return "a shell started from \(f.parentName.isEmpty ? "another program" : f.parentName) is waiting, not the tab's own shell"
         }
         guard f.pgid == f.tpgid else { return "something else is in the foreground" }
@@ -68,16 +75,18 @@ struct RestorePane: Equatable {
     }
 
     /// For terminals that report each pane's tty and foreground process. `hostPid`: the terminal
-    /// app's process, which may start shells itself.
+    /// app's process.
     static func from(id: String, tty: String?, foregroundPid pid: Int32?, hostPid: Int32?) -> RestorePane {
         guard let pid, pid > 0, let e = ProcInfo.info(pid) else {
             return RestorePane(id: id, tty: tty, foreground: "", started: nil, cwd: nil, problem: "nothing is running")
         }
         let path = ProcInfo.path(pid)
         let name = path.isEmpty ? e.name : (path as NSString).lastPathComponent
-        let f = Foreground(name: name, uid: e.uid, parentName: ProcInfo.info(e.ppid)?.name ?? "", parentPid: e.ppid,
+        let parent = ProcInfo.info(e.ppid)
+        let f = Foreground(name: name, uid: e.uid, parentName: parent?.name ?? "", parentPid: e.ppid,
+                           parentUID: parent?.uid ?? 0, grandparentPid: parent?.ppid ?? 0,
                            pgid: e.pgid, tpgid: e.tpgid, tty: ProcInfo.tty(pid))
-        return RestorePane(id: id, tty: tty, foreground: name, started: e.start, cwd: ProcInfo.cwd(pid),
+        return RestorePane(id: id, tty: tty, pid: pid, foreground: name, started: e.start, cwd: ProcInfo.cwd(pid),
                            problem: problem(f, paneTTY: tty, hostPid: hostPid))
     }
 
@@ -156,8 +165,9 @@ protocol TerminalAdapter: AnyObject {
     var appBundleID: String? { get }
     /// Worker. Every pane, with what runs in front of it. nil when the terminal cannot say.
     func restorablePanes() -> [RestorePane]?
-    /// Worker. Types `command` into the pane and presses Return. False if that did not work.
-    func type(_ command: String, into paneID: String) -> Bool
+    /// Worker. Clears the line, types `command` into the pane and presses Return, but only if `pid` is still
+    /// its foreground process. False if it is not, or if that did not work.
+    func type(_ command: String, into paneID: String, ifForeground pid: Int32) -> Bool
     /// Worker. Why the terminal will not reopen its panes after a relaunch (a setting to change),
     /// or nil. Shown in Settings → General → Restore.
     func restoreProblem() -> String?
@@ -173,7 +183,7 @@ extension TerminalAdapter {
     var restoresPanes: Bool { false }
     var appBundleID: String? { scriptedBundleID }
     func restorablePanes() -> [RestorePane]? { nil }
-    func type(_ command: String, into paneID: String) -> Bool { false }
+    func type(_ command: String, into paneID: String, ifForeground pid: Int32) -> Bool { false }
     func restoreProblem() -> String? { nil }
 }
 
@@ -501,6 +511,11 @@ final class ScriptThread {
 enum Presence {
     static var idleSeconds: Double {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+    }
+
+    /// Since your last keystroke only: moving the pointer or clicking (Resume, say) is not typing.
+    static var keyboardIdleSeconds: Double {
+        CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
     }
 }
 

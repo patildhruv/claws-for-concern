@@ -33,15 +33,18 @@ final class GhosttyAdapter: TerminalAdapter {
     }
 
     /// The terminal on the session's tty, as of the adapter's last listings: no Apple Events here.
+    /// Only a sighting in the Ghostty process the session runs under counts: after a relaunch, its
+    /// old tty may belong to someone else's tab.
     func paneID(for s: SessionState) -> String? {
         lock.lock(); defer { lock.unlock() }
-        return ttys.pane(tty: s.tty, since: s.claudeStart)
+        return ttys.pane(tty: s.tty, since: s.claudeStart, host: s.hostPid)
     }
 
     func lookedAt(front: FrontApp) -> Set<String> {
-        lastFocused = front.bundleID == scriptedBundleID ? focusedTerminal() : nil
-        if let f = lastFocused, f.tty != nil {
-            lock.lock(); ttys.saw(f, at: Date().timeIntervalSince1970); lock.unlock()
+        let g = ready
+        lastFocused = front.bundleID == scriptedBundleID && g != nil ? focusedTerminal() : nil
+        if let f = lastFocused, f.tty != nil, let g {
+            lock.lock(); ttys.saw(f, at: Date().timeIntervalSince1970, host: g.processIdentifier); lock.unlock()
         }
         return lastFocused.map { [$0.id] } ?? []
     }
@@ -78,7 +81,7 @@ final class GhosttyAdapter: TerminalAdapter {
             let (l, error) = listing(withTTY: true)
             if let l {
                 ttySupport = (g.processIdentifier, true)
-                lock.lock(); ttys.list(l, at: Date().timeIntervalSince1970); lock.unlock()
+                lock.lock(); ttys.list(l, at: Date().timeIntervalSince1970, host: g.processIdentifier); lock.unlock()
                 return l
             }
             // Only a term its dictionary lacks means Ghostty 1.3; a timeout or a busy app means nothing.
@@ -89,13 +92,27 @@ final class GhosttyAdapter: TerminalAdapter {
         return listing(withTTY: false).panes
     }
 
-    private func listing(withTTY: Bool) -> (panes: [PaneInfo]?, error: Int?) {
-        let props = withTTY ? "{id, working directory, name, tty, pid}" : "{id, working directory, name}"
-        let src = """
-        with timeout of 3 seconds
-          tell application id \(Script.quote(app)) to get \(props) of every terminal
-        end timeout
+    /// Every script runs inside `if application id … is running`: `ready` reads NSRunningApplication
+    /// off the main thread, which can lag a quit, and telling a quit app anything launches it again.
+    static func guarded(_ app: String, _ body: String) -> String {
         """
+        if application id \(Script.quote(app)) is running then
+        \(body)
+        end if
+        """
+    }
+
+    static func listingScript(app: String, withTTY: Bool) -> String {
+        let props = withTTY ? "{id, working directory, name, tty, pid}" : "{id, working directory, name}"
+        return guarded(app, """
+        with timeout of 3 seconds
+          tell application id \(Script.quote(app)) to return \(props) of every terminal
+        end timeout
+        """)
+    }
+
+    private func listing(withTTY: Bool) -> (panes: [PaneInfo]?, error: Int?) {
+        let src = GhosttyAdapter.listingScript(app: app, withTTY: withTTY)
         let columns = withTTY ? 5 : 3
         let r = Script.attempt(src, cacheKey: "ghostty.all.\(withTTY).\(app)")
         guard let d = r.result, d.numberOfItems == columns else { return (nil, r.error) }
@@ -117,15 +134,20 @@ final class GhosttyAdapter: TerminalAdapter {
     }
 
     func focus(paneID: String, session: SessionState) -> Bool {
-        let safe = paneID.filter { $0.isHexDigit || $0 == "-" }
-        return Script.run("""
+        Script.run(GhosttyAdapter.focusScript(app: app, terminal: paneID))?.stringValue == "ok"
+    }
+
+    static func focusScript(app: String, terminal: String) -> String {
+        let safe = terminal.filter { $0.isHexDigit || $0 == "-" }
+        return guarded(app, """
         with timeout of 3 seconds
           tell application id \(Script.quote(app))
             focus (terminal id "\(safe)")
             activate
           end tell
         end timeout
-        """) != nil
+        return "ok"
+        """)
     }
 
     func health() -> AdapterHealth {
@@ -142,19 +164,23 @@ final class GhosttyAdapter: TerminalAdapter {
         return l.map { RestorePane.from(id: $0.id, tty: $0.tty, foregroundPid: $0.pid, hostPid: g.processIdentifier) }
     }
 
-    func type(_ command: String, into paneID: String) -> Bool {
+    func type(_ command: String, into paneID: String, ifForeground pid: Int32) -> Bool {
         guard ready != nil else { return false }
-        return Script.run(GhosttyAdapter.typeScript(app: app, terminal: paneID, command: command))?.stringValue == "ok"
+        return Script.run(GhosttyAdapter.typeScript(app: app, terminal: paneID, pid: pid, command: command))?.stringValue == "ok"
     }
 
-    /// Ctrl-U first (pressed and released) clears anything already on the line, then the command
-    /// as if pasted, then Return.
-    static func typeScript(app: String, terminal: String, command: String) -> String {
+    /// Types only while `pid` (the shell the restore checked) is still the tab's foreground process.
+    /// Ctrl-E then Ctrl-U (each pressed and released) clear the whole line: bash and fish kill only
+    /// what is left of the cursor. Then the command as if pasted, then Return.
+    static func typeScript(app: String, terminal: String, pid: Int32, command: String) -> String {
         let safe = terminal.filter { $0.isHexDigit || $0 == "-" }
-        return """
+        return guarded(app, """
         with timeout of 3 seconds
           tell application id \(Script.quote(app))
             set t to terminal id "\(safe)"
+            if (pid of t) is not \(pid) then return "moved"
+            send key "e" action press modifiers "control" to t
+            send key "e" action release modifiers "control" to t
             send key "u" action press modifiers "control" to t
             send key "u" action release modifiers "control" to t
             input text \(Script.quote(command)) to t
@@ -162,7 +188,7 @@ final class GhosttyAdapter: TerminalAdapter {
           end tell
         end timeout
         return "ok"
-        """
+        """)
     }
 
     /// Ghostty brings its tabs back after quitting only with `window-save-state = always`; the
@@ -179,10 +205,14 @@ final class GhosttyAdapter: TerminalAdapter {
         }.joined(separator: "|")
         if let c = problemCache, c.stamp == stamp { return c.problem }
         let cli = url.appendingPathComponent("Contents/MacOS/ghostty").path
-        guard let r = Command.run(cli, ["+show-config", "--no-pager"], timeout: 3), r.status == 0 else { return nil }
-        let value = GhosttyAdapter.saveState(r.out) ?? "default"
-        let problem = value == "always" ? nil
-            : "Ghostty reopens its tabs after quitting only with window-save-state = always in its config (it is \(value))."
+        let problem: String?
+        if let r = Command.run(cli, ["+show-config", "--no-pager"], timeout: 3), r.status == 0 {
+            let value = GhosttyAdapter.saveState(r.out) ?? "default"
+            problem = value == "always" ? nil
+                : "Ghostty reopens its tabs after quitting only with window-save-state = always in its config (it is \(value))."
+        } else {
+            problem = nil  // Ghostty's own tool failed: say nothing, and do not run it again until something changes
+        }
         problemCache = (stamp, problem)
         return problem
     }
@@ -217,21 +247,23 @@ final class GhosttyAdapter: TerminalAdapter {
     private func focusedTerminal() -> PaneInfo? {
         guard let g = ready else { return nil }
         if hasTTY(g) == true {
-            guard let s = Script.run(focusedScript(withTTY: true), cacheKey: "ghostty.focused.true.\(app)")?.stringValue else { return nil }
+            guard let s = Script.run(GhosttyAdapter.focusedScript(app: app, withTTY: true), cacheKey: "ghostty.focused.true.\(app)")?.stringValue
+            else { return nil }
             let p = s.components(separatedBy: "\t")
             return p.count >= 4 ? PaneInfo(id: p[0], cwd: p[1], name: p[3...].joined(separator: "\t"), tty: p[2].isEmpty ? nil : p[2]) : nil
         }
-        guard let s = Script.run(focusedScript(withTTY: false), cacheKey: "ghostty.focused.false.\(app)")?.stringValue else { return nil }
+        guard let s = Script.run(GhosttyAdapter.focusedScript(app: app, withTTY: false), cacheKey: "ghostty.focused.false.\(app)")?.stringValue
+        else { return nil }
         let p = s.components(separatedBy: "\t")
         return p.count >= 3 ? PaneInfo(id: p[0], cwd: p[1], name: p[2...].joined(separator: "\t")) : nil
     }
 
-    private func focusedScript(withTTY: Bool) -> String {
+    static func focusedScript(app: String, withTTY: Bool) -> String {
         // `tab` is a Ghostty class, so the tab character is bound outside the tell block. The title
         // goes last: it may contain anything.
         let fields = withTTY ? "(id of t) & sep & (working directory of t) & sep & (tty of t) & sep & (name of t)"
             : "(id of t) & sep & (working directory of t) & sep & (name of t)"
-        return """
+        return guarded(app, """
         set sep to tab
         with timeout of 2 seconds
           tell application id \(Script.quote(app))
@@ -240,33 +272,35 @@ final class GhosttyAdapter: TerminalAdapter {
             return \(fields)
           end tell
         end timeout
-        """
+        """)
     }
 }
 
 /// Ghostty terminals by tty, from the listings the adapter makes anyway, so `paneID(for:)` answers
 /// on the main thread without asking Ghostty. Pure, for the self-test.
 struct TTYMap {
-    struct Seen: Equatable { let id: String; let at: Double }
+    struct Seen: Equatable { let id: String; let at: Double; let host: Int32 }
     private(set) var byTTY: [String: Seen] = [:]
 
-    /// A full listing replaces the map: a terminal missing from it is gone.
-    mutating func list(_ panes: [PaneInfo], at t: Double) {
+    /// A full listing replaces the map: a terminal missing from it is gone. `host`: the Ghostty
+    /// process that answered.
+    mutating func list(_ panes: [PaneInfo], at t: Double, host: Int32) {
         byTTY = [:]
-        for p in panes { if let tty = p.tty { byTTY[tty] = Seen(id: p.id, at: t) } }
+        for p in panes { if let tty = p.tty { byTTY[tty] = Seen(id: p.id, at: t, host: host) } }
     }
 
     /// One terminal seen now (the focused one).
-    mutating func saw(_ p: PaneInfo, at t: Double) {
+    mutating func saw(_ p: PaneInfo, at t: Double, host: Int32) {
         guard let tty = p.tty else { return }
         byTTY = byTTY.filter { $0.value.id != p.id }
-        byTTY[tty] = Seen(id: p.id, at: t)
+        byTTY[tty] = Seen(id: p.id, at: t, host: host)
     }
 
     /// A tty is reused once its terminal closes, so only a sighting made after the session's Claude
-    /// process started names that session's terminal.
-    func pane(tty: String?, since start: Double?) -> String? {
-        guard let tty, let s = byTTY[tty], s.at >= (start ?? 0) else { return nil }
+    /// process started, by the Ghostty process the session runs under, names that session's terminal.
+    /// A dead session's tty may belong to another tab of a relaunched Ghostty.
+    func pane(tty: String?, since start: Double?, host: Int32?) -> String? {
+        guard let tty, let host, let s = byTTY[tty], s.host == host, s.at >= (start ?? 0) else { return nil }
         return s.id
     }
 }
@@ -309,7 +343,8 @@ extension GhosttyAdapter {
     /// into its shell: typed rather than run, so the user's aliases apply and the tab stays open after.
     /// Never types into an existing terminal.
     static func newPaneScript(app: String, in dir: String, typing command: String) -> String {
-        """
+        // `Terminals.newPane` launched Ghostty first; a quit since must not relaunch it.
+        guarded(app, """
         with timeout of 5 seconds
           tell application id \(Script.quote(app))
             set cfg to {initial working directory:\(Script.quote(dir)), initial input:\(Script.quote(command)) & linefeed}
@@ -321,10 +356,11 @@ extension GhosttyAdapter {
             activate
           end tell
         end timeout
-        """
+        return "ok"
+        """)
     }
 
     func newPane(in dir: String, typing command: String) -> Bool {
-        Script.run(GhosttyAdapter.newPaneScript(app: app, in: dir, typing: command)) != nil
+        Script.run(GhosttyAdapter.newPaneScript(app: app, in: dir, typing: command))?.stringValue == "ok"
     }
 }

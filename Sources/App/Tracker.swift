@@ -333,13 +333,12 @@ final class Tracker {
         }
     }
 
-    /// The pane a restore may type into: named by the adapter outright, now or when last seen (Ghostty:
-    /// by tty), never a learned guess.
+    /// The pane a restore may type into: the one the adapter named outright (Ghostty: by tty) while
+    /// the session ran, never a learned guess. The stored one comes first: once the session is dead,
+    /// a live lookup can only be worse.
     private func exactPane(_ s: SessionState) -> String? {
-        let a = terminals.adapter(for: s)
-        if let p = a.paneID(for: s) { return p }
-        guard let m = saved.meta[s.sessionId], m.exact == true else { return nil }
-        return m.terminalId
+        if let m = saved.meta[s.sessionId], m.exact == true, let p = m.terminalId { return p }
+        return terminals.adapter(for: s).paneID(for: s)
     }
 
     /// When each learning adapter last really listed its panes (epoch seconds, when the listing began).

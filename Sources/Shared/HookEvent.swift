@@ -130,7 +130,8 @@ enum HookEvent {
         if let termProgram { s.termProgram = termProgram }
         if let terminal, !terminal.isEmpty { s.terminal = terminal }
         if let tty { s.tty = tty }
-        if let host { s.hostPid = host.pid; s.hostStart = host.start }
+        // A Claude process with no terminal above it (launchd is its parent) is not its own host.
+        if let host, host.pid != pid { s.hostPid = host.pid; s.hostStart = host.start }
 
         // PostToolUse fires on every tool call; only touch the file when something changed.
         if state != nil, s == before { return .ignore }
