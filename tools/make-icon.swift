@@ -1,8 +1,20 @@
 // Draws AppIcon.icns: our own pixel crab, slightly worried, under a thought bubble.
-// Usage: xcrun swift tools/make-icon.swift <output dir>
+// With "search", SearchIcon.icns for the search helper: the same crab thinking of a magnifier.
+// Usage: xcrun swift tools/make-icon.swift <output dir> [search]
 import AppKit
 
 let out = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "Resources", isDirectory: true)
+let search = CommandLine.arguments.dropFirst(2).first == "search"
+let iconName = search ? "SearchIcon" : "AppIcon"
+let magnifier = [
+    ".###...",
+    "#...#..",
+    "#...#..",
+    "#...#..",
+    ".###...",
+    "....##.",
+    ".....##",
+]
 let crab = [
     ".#########.",
     ".#########.",
@@ -73,17 +85,28 @@ func drawIcon(_ s: CGFloat) {
     NSColor.white.setFill()
     bubblePath.fill(); t1.fill(); t2.fill()
     NSGraphicsContext.restoreGraphicsState()
-    // A pixel "!": a 1 x 3 bar and a dot, centred.
-    let px = (bubble.height * 0.13).rounded()
-    let bx = (bubble.midX - px / 2).rounded()
-    let top = (bubble.midY + px * 1.9).rounded()
     clay.setFill()
-    NSRect(x: bx, y: top - px * 3, width: px, height: px * 3).fill()
-    NSRect(x: bx, y: top - px * 4.6, width: px, height: px).fill()
+    if search {
+        // A pixel magnifier, 7 x 7 cells, centred.
+        let px = (bubble.height * 0.085).rounded()
+        let left = (bubble.midX - px * 3.5).rounded(), top = (bubble.midY + px * 3.5).rounded()
+        for (r, row) in magnifier.enumerated() {
+            for (c, ch) in row.enumerated() where ch == "#" {
+                NSRect(x: left + CGFloat(c) * px, y: top - CGFloat(r + 1) * px, width: px, height: px).fill()
+            }
+        }
+    } else {
+        // A pixel "!": a 1 x 3 bar and a dot, centred.
+        let px = (bubble.height * 0.13).rounded()
+        let bx = (bubble.midX - px / 2).rounded()
+        let top = (bubble.midY + px * 1.9).rounded()
+        NSRect(x: bx, y: top - px * 3, width: px, height: px * 3).fill()
+        NSRect(x: bx, y: top - px * 4.6, width: px, height: px).fill()
+    }
     NSGraphicsContext.restoreGraphicsState()
 }
 
-let iconset = FileManager.default.temporaryDirectory.appendingPathComponent("AppIcon.iconset")
+let iconset = FileManager.default.temporaryDirectory.appendingPathComponent("\(iconName).iconset")
 try? FileManager.default.removeItem(at: iconset)
 try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
 for (pt, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)] {
@@ -101,10 +124,12 @@ for (pt, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256
 try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 let p = Process()
 p.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-p.arguments = ["-c", "icns", iconset.path, "-o", out.appendingPathComponent("AppIcon.icns").path]
+p.arguments = ["-c", "icns", iconset.path, "-o", out.appendingPathComponent("\(iconName).icns").path]
 try p.run()
 p.waitUntilExit()
-try? FileManager.default.removeItem(at: out.appendingPathComponent("AppIcon-1024.png"))
-try? FileManager.default.copyItem(at: iconset.appendingPathComponent("icon_512x512@2x.png"),
-                                  to: out.appendingPathComponent("AppIcon-1024.png"))
-print("wrote \(out.path)/AppIcon.icns")
+if !search {
+    try? FileManager.default.removeItem(at: out.appendingPathComponent("AppIcon-1024.png"))
+    try? FileManager.default.copyItem(at: iconset.appendingPathComponent("icon_512x512@2x.png"),
+                                      to: out.appendingPathComponent("AppIcon-1024.png"))
+}
+print("wrote \(out.path)/\(iconName).icns")

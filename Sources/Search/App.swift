@@ -34,6 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Opened from a menu bar app, which is not active itself: ask to come forward.
         NSApp.activate()
+        // Never linger as a Dock icon with nothing to close: if no window came up, quit.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            if !NSApp.windows.contains(where: { $0.isVisible || $0.isMiniaturized }) { NSApp.terminate(nil) }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
