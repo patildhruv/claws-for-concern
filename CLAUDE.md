@@ -88,8 +88,13 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   `kill -9` sends nothing (the tracker reaps it as `vanished`). The SessionEnd hook runs on quit.
 - `input text` + `send key "enter"` into a reopened terminal ran `claude --resume <id>` in its folder:
   the same session ID came back from a new process. `send key` with `modifiers "control"` needs a
-  `press` and a `release` once Claude Code runs (a lone press did nothing). Ctrl-U (press + release)
-  cleared text left on a reopened tab's prompt before the command was typed.
+  `press` and a `release` once Claude Code runs (a lone press did nothing). Ctrl-E then Ctrl-U (press +
+  release) cleared text on both sides of the cursor in a reopened bash tab (`echo LEFT RIGHT`, cursor
+  moved back 5 with Ctrl-B) before the command was typed. `send key` knows no "left" or "arrow_left".
+- Ghostty's own default shell comes from passwd, not `SHELL` in its environment; `command = /bin/bash`
+  still runs it under `login`. With that bash, reopened tabs started in the home folder, not the
+  session's (they were refused); `working-directory` in the config fixed it. `window-save-state =
+  never` still reopened the tabs saved by an earlier `always` run.
 - Ghostty's `pid` is the terminal's foreground process group (its leader): the login shell when idle
   (parent `login`, which runs as root under Ghostty); a script waiting on `read` (a zsh whose parent is
   the login shell); for `sleep 300 | cat`, `sleep`, not `cat`.

@@ -497,19 +497,24 @@ final class Restorer {
         terminals.worker.run {
             let panes = a.restorablePanes()
             let focused = a.lookedAt(front: front)
+            let idle = self.idleSeconds()
             let step = RestorePlan.step(e, panes: panes, launch: launch, hostAlive: self.hostAlive(e), now: Date().timeIntervalSince1970,
-                                        template: template, focused: focused, keyboardIdle: self.idleSeconds())
+                                        template: template, focused: focused, keyboardIdle: idle)
             var typed = false
             if case let .type(command, pid) = step { typed = a.type(command, into: e.pane, ifForeground: pid) }
             DispatchQueue.main.async {
                 switch step {
                 case .later:
+                    self.log("\(e.sessionId.prefix(8)): later (" + (panes == nil ? "no answer from \(a.name)"
+                        : String(format: "its tab in front, last keystroke %.1f s ago, any input %.1f s ago", idle, Presence.idleSeconds)) + ")")
                     self.resume(a, rest, later: later + [e], launch: launch, gen: gen, until: deadline)
                 case .drop(let why):
                     self.forget([e], why: "not resumed, " + why)
                     self.resume(a, rest, later: later, launch: launch, gen: gen, until: deadline)
                 case .type where typed:
-                    self.log("\(e.sessionId.prefix(8)): resumed in pane \(e.pane.prefix(8))")
+                    self.log("\(e.sessionId.prefix(8)): resumed in pane \(e.pane.prefix(8))"
+                             + (focused.contains(e.pane) ? String(format: " (its tab in front, last keystroke %.1f s ago, any input %.1f s ago)",
+                                                                 idle, Presence.idleSeconds) : ""))
                     self.forget([e], why: nil)
                     self.resume(a, rest, later: later, launch: launch, gen: gen, until: deadline)
                 case .type:
