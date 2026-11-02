@@ -154,32 +154,43 @@ When your terminal quits (or crashes, or the Mac restarts), the Claude Code sess
 with it. If it reopens those panes on its next launch, Restore types the user's resume command into
 each one. All the bookkeeping is shared (`Sources/App/Restore.swift`):
 
-- The hook marks a session ended when SessionEnd's `reason` is not a deliberate exit; the tracker moves
-  it, with the pane ID your `paneID(for:)` (or learning) gave it, into the restore ledger.
-- An entry is dropped if the terminal process that hosted the session is still running 12 s after
-  the end (a tab closed, or claude ended in a pane that stayed open): Restore is for a terminal that
-  went away. It is also dropped after the relaunch that did not bring its pane back, after a week, and
-  once its pane hosts another session.
-- When `appBundleID` launches (or runs when Claws starts), Restore polls `restorablePanes()` once a
-  second until the list settles, then types into a pane only if it **exists under the entry's pane
-  ID**, has **a shell in front** (`atShell`), **started after the session ended** (`started`: so it
-  was reopened, not left open), and is **in the session's folder** (symlinks resolved).
+- The hook marks a session ended when SessionEnd's `reason` is not a deliberate exit, and records the
+  terminal process it runs under (the Claude process's ancestor directly under launchd). The tracker
+  moves the session into the restore ledger, only with a pane your adapter named outright
+  (`paneID(for:)`), never a learned one.
+- Restore is for a terminal that **went away with the session**. It types only when all hold:
+  (a) that terminal process has exited, (b) the one running now launched after the session ended,
+  (c) Claws saw that launch or started at most 2 minutes after it, and (d) the pane's shell started
+  within 60 s of the launch. An entry whose terminal still runs 12 s after the end (a tab closed, or
+  claude ended in a pane that stayed open) is dropped. Each entry gets one launch: what ended before a
+  launch and was not resumed then (not reopened, refused, not answered) is dropped, and so is everything
+  that ended before a launch Claws missed.
+- When `appBundleID` launches, Restore polls `restorablePanes()` once a second until the list settles,
+  then types into a pane only if it **exists under the entry's pane ID**, has **the tab's own login
+  shell alone in front** (`RestorePane.problem`: a shell, the user's, started by `login` or the
+  terminal, its group the tty's foreground group, on the pane's tty), and **that shell's working
+  directory is the session's folder** (both as the kernel reports them; no file system access). It
+  checks again right before typing, clears the line with Ctrl-U, and waits while the tab is in front
+  and the user typed in the last 3 s.
 
 What you implement, all on the worker:
 
 - `restoresPanes`: true. Your pane IDs must survive a relaunch: check that before anything else.
-- `restorablePanes()`: every pane with its folder and foreground process, or nil if the terminal
-  cannot say. If your terminal reports each pane's foreground PID, `RestorePane.from(id:cwd:foregroundPid:)`
-  fills in the rest (shell or not, start time). Return nil, not a guess, when you cannot tell.
-- `type(_:into:)`: type the command into that existing pane and press Return. Restore calls it only
-  after the checks above, and checks again right before (the user may have used the tab meanwhile).
+- `restorablePanes()`: every pane with its tty and foreground process, or nil if the terminal cannot
+  say. If your terminal reports each pane's tty and foreground process group (as Ghostty's `pid` does),
+  `RestorePane.from(id:tty:foregroundPid:hostPid:)` fills in the rest. Return nil, not a guess, when
+  you cannot tell, and never script your app unless it runs and has finished launching (scripting an
+  app that is not running launches it).
+- `type(_:into:)`: clear the line, type the command into that existing pane and press Return.
 - `restoreProblem()`, optional: why the terminal will not reopen its panes (Ghostty: its
-  `window-save-state` is not `always`). Bound any tool you run with `Command.run`.
+  `window-save-state` is not `always`). Bound any tool you run with `Command.run`, and cache the answer.
 
-Test it against a **copy** of your terminal under another bundle ID, never the one with your sessions:
-`--restore-status` shows the ledger and what Restore would do with each entry, `--watch` runs the
-tracker and Restore without the menu bar app (printing each step), and `--restore-run [--yes]` runs a
-restore now. For Ghostty, `--bundle-id <copy's ID>` points the adapter at the copy.
+Test it against a **copy** of your terminal under another bundle ID, never the one with your sessions,
+with a data folder of its own (`CLAWS_HOME`): `--restore-status` shows the ledger and what Restore
+would do with each entry, `--watch` runs the tracker and Restore without the menu bar app (printing
+each step), and `--restore-run [--yes]` runs a restore now (without `--yes` it writes nothing). For
+Ghostty, `--bundle-id <copy's ID>` points the adapter at the copy; `--restore-on` acts as if Restore
+were on in that process; `--assume-active S` counts you as typing for S seconds.
 
 ### 4. Register it
 

@@ -326,11 +326,13 @@ enum CLI {
               --terminals       which terminal each live session is in, its pane, and what you are looking at
               --open-session ID jump to a session the way a click does (ID prefix is enough)
               --restore-status  the restore ledger, and what a restore would do with each entry now
-              --restore-run [--yes] [--command TEMPLATE]
+              --restore-run [--yes] [--command TEMPLATE] [--restore-on] [--assume-active S]
                                 run the restore now (--yes: type the resume command without asking)
-              --watch [--yes] [--seconds N] [--command TEMPLATE]
+              --watch [--yes] [--seconds N] [--command TEMPLATE] [--restore-on] [--assume-active S]
                                 track sessions and restore without the menu bar app, printing each step
-                                (the three restore commands take --bundle-id ID: a copy of Ghostty to drive)
+                                (needs its own CLAWS_HOME; the restore commands take --bundle-id ID, a
+                                copy of Ghostty to drive; --restore-on: as if Restore were on, this
+                                process only; --assume-active S: count as typing for S seconds)
               --displays        list displays and each one's saved spot
               --open-settings [TAB]  open the running app's Settings (general, clawds, appearance, …)
               --selftest        run the built-in checks (prints ALL PASS)

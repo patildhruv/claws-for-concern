@@ -229,6 +229,9 @@ final class Restorer {
     var echo = false
     /// Seconds since your last keystroke or pointer move; tests replace it (`--assume-active`).
     var idleSeconds: () -> Double = { Presence.idleSeconds }
+    /// The CLI's `--restore-on`: act as if Restore were on in this process, leaving the setting alone.
+    var forceOn = false
+    private var enabled: Bool { forceOn || Settings.restore }
     /// When Claws started: a terminal launched up to 2 minutes earlier still counts as observed.
     let startedAt = Date().timeIntervalSince1970
     /// Terminal processes seen launching while Claws ran.
@@ -246,9 +249,11 @@ final class Restorer {
 
     func start() {
         let now = Date().timeIntervalSince1970
-        write("forgot on start") { l in
-            l.expire(now: now)
-            l.remove { RestorePlan.hostStayed($0, now: now, alive: ProcInfo.isAlive) }
+        let stale = RestoreLedger.load().entries.filter {
+            now - $0.endedTs > RestoreLedger.maxAge || RestorePlan.hostStayed($0, now: now, alive: ProcInfo.isAlive)
+        }
+        if !stale.isEmpty {
+            forget(stale, why: "a week old, or the terminal it ran in is still running")
         }
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
@@ -295,7 +300,7 @@ final class Restorer {
     /// Sessions that ended with their tab: kept until their terminal reopens it.
     func remember(_ entries: [RestoreEntry]) {
         let valid = entries.filter { ResumeRequest.isSessionID($0.sessionId) && $0.hostPid != nil }
-        guard !valid.isEmpty, Settings.restore else { return }
+        guard !valid.isEmpty, enabled else { return }
         write("remembered " + valid.map { "\($0.sessionId.prefix(8)) (\($0.reason), pane \($0.pane.prefix(8)))" }.joined(separator: ", ")) { l in
             valid.forEach { l.add($0) }
         }
@@ -328,7 +333,7 @@ final class Restorer {
 
     @discardableResult
     private func begin(_ a: TerminalAdapter, why: String) -> Bool {
-        guard Settings.restore, !underWay.contains(a.id), let app = running(a), let at = app.launchDate?.timeIntervalSince1970 else { return false }
+        guard enabled, !underWay.contains(a.id), let app = running(a), let at = app.launchDate?.timeIntervalSince1970 else { return false }
         tracker?.reapNow()
         let mine = RestoreLedger.load().entries.filter { $0.adapter == a.id }
         guard !mine.isEmpty else { return false }
@@ -612,6 +617,8 @@ enum RestoreCLI {
             let until = Date().addingTimeInterval(s)
             Restorer.shared.idleSeconds = { Date() < until ? 0 : 3600 }
         }
+        // Restore switched off in Settings, but a test needs it in this process only.
+        Restorer.shared.forceOn = args.contains("--restore-on")
     }
 
     /// `--watch` writes the ledger and app state as the app does: only into a data folder of its own.
@@ -627,7 +634,7 @@ enum RestoreCLI {
     static func status(_ args: [String]) -> Int32 {
         setUp(args)
         let now = Date().timeIntervalSince1970
-        print("Restore: \(Settings.restore ? "on" : "off"), \(Settings.restoreWithoutAsking ? "resumes without asking" : "asks first"). Types: \(Settings.resumeCommand)")
+        print("Restore: \(Settings.restore ? "on" : "off") in Settings, \(Settings.restoreWithoutAsking ? "resumes without asking" : "asks first"). Types: \(Settings.resumeCommand)")
         let ledger = RestoreLedger.load()
         print("\n\(Paths.restore.path): \(ledger.entries.count) session\(ledger.entries.count == 1 ? "" : "s")")
         for e in ledger.entries.sorted(by: { $0.endedTs > $1.endedTs }) {

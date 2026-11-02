@@ -317,6 +317,12 @@ enum SelfTest {
         check("ghostty: version check", GhosttyAdapter.isBefore("1.3.1", [1, 4]) && !GhosttyAdapter.isBefore("1.4.0", [1, 4])
               && !GhosttyAdapter.isBefore("1.10", [1, 4]) && !GhosttyAdapter.isBefore("2.0", [1, 4]) && GhosttyAdapter.isBefore("1.4.0-dev", [1, 5]))
         check("ghostty: restores, other terminals do not", Terminals.shared.adapters.filter(\.restoresPanes).map(\.id) == ["ghostty"])
+        // Telling an app that is not running anything launches it: these return before any script.
+        let absent = GhosttyAdapter(bundleID: "io.example.claws.not-installed")
+        check("ghostty: never scripted unless running and done launching",
+              absent.list() == nil && absent.restorablePanes() == nil && !absent.type("x", into: "AB12"))
+        check("applescript: an undefined term is -2753 (Ghostty 1.3's missing tty), not a timeout",
+              Script.attempt("return tty").error == Script.undefinedTerm)
     }
 
     static func geometry() {

@@ -24,9 +24,10 @@ $B --install-hooks | --remove-hooks | --hooks-status
 $B --terminals              # each live session: its terminal adapter, pane, "looking at it"; adapter health
 $B --open-session <id>      # the click path for one session (an ID prefix is enough)
 $B --restore-status         # the restore ledger, the terminal's panes, and the verdict for each entry
-$B --restore-run [--yes] [--command T]   # the app's restore, now (--yes: type without asking)
-$B --watch [--yes] [--seconds N] [--command T]   # tracker + restore without the UI, printing each step
-                            # (restore commands: --bundle-id ID drives a Ghostty copy; CLAWS_HOME=dir isolates data)
+$B --restore-run [--yes] [--command T]   # the app's restore, now (--yes: type without asking; else read-only)
+$B --watch [--yes] [--seconds N] [--command T]   # tracker + restore without the UI; needs its own CLAWS_HOME
+                            # (--bundle-id ID drives a Ghostty copy; --restore-on: as if Restore were on,
+                            #  this process only; --assume-active S: you count as typing for S seconds)
 $B --displays               # each display's UUID and saved spot
 $B --open-settings [TAB]    # opens the running app's Settings on a tab (distributed notification)
 $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps it (needs ffmpeg)
@@ -87,7 +88,12 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   `kill -9` sends nothing (the tracker reaps it as `vanished`). The SessionEnd hook runs on quit.
 - `input text` + `send key "enter"` into a reopened terminal ran `claude --resume <id>` in its folder:
   the same session ID came back from a new process. `send key` with `modifiers "control"` needs a
-  `press` and a `release` once Claude Code runs (a lone press did nothing).
+  `press` and a `release` once Claude Code runs (a lone press did nothing). Ctrl-U (press + release)
+  cleared text left on a reopened tab's prompt before the command was typed.
+- Ghostty's `pid` is the terminal's foreground process group (its leader): the login shell when idle
+  (parent `login`, which runs as root under Ghostty); a script waiting on `read` (a zsh whose parent is
+  the login shell); for `sleep 300 | cat`, `sleep`, not `cat`.
+- Ghostty's restored windows reopen with the tab that was selected at quit selected again.
 
 ## Traps (each cost real time)
 
@@ -128,7 +134,12 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   never see them. A fresh copy raises the Automation prompt again. Its reopened windows come back
   under that bundle ID from an earlier run: not stored in `~/Library/Preferences` or `var/folders`
   (location not found; `~/Library/Saved Application State` does not exist on macOS 27).
+- **A test build shares the installed app's UserDefaults** (same bundle ID): its `restore` switch,
+  resume command and the rest. Never write them from a test; `--restore-on` turns Restore on in the
+  test process only. Never send anything to the installed or running Claws from a test.
 - **`print` from the CLI to a file is block-buffered**: `--watch` looked silent. `RestoreCLI` line-buffers stdout.
+- **Telling an app that is not running anything launches it** (`tell application id …`). Every
+  restore query and typing call checks `isFinishedLaunching` first.
 
 ## Terminal adapters (`Sources/App/Terminals/`, guide: docs/adapters.md)
 
@@ -167,19 +178,31 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
 
 - The hook keeps a session marked ended (`end_reason`, `ended_ts`) unless SessionEnd's reason is
   deliberate (`HookEvent.deliberateEnds`); after that only a SessionStart (or a new process) revives
-  it. The tracker moves ended sessions, and sessions whose process vanished (`reason: vanished`,
-  ended = last update), into `restore.json` with their pane ID, then deletes the file under the hook's
-  lock (non-blocking; skipped if the hook rewrote it).
-- An entry goes when its session runs again, when its pane hosts another session, 12 s after it was
-  remembered if the Ghostty process that hosted it (launched before its Claude process) still runs
-  (Cmd-W, claude ended in an open tab), after the relaunch that did not bring its tab back, after Not
-  Now or a resume, and after 7 days.
-- On Ghostty's launch (or at app start with Ghostty running) `Restorer` polls the panes once a second
-  until settled (same list twice with every remembered pane at a shell, or unchanged 5 s, at most
-  30 s), then types `Settings.resumeCommand` only into a pane that exists under the entry's ID, has a
-  shell in front, started after the session ended, and is in its folder (realpath). It asks first in
-  a non-activating floating panel (titles and folders, 5 then "and N more"), unless
-  `restoreWithoutAsking`; it checks each pane again right before typing.
+  it. It also records the terminal process the session runs under (`host_pid`, `host_start`: the
+  Claude process's ancestor directly under launchd). The tracker moves ended sessions, and sessions
+  whose process vanished (`reason: vanished`, ended = last update), into `restore.json` with their
+  tty-confirmed pane (`Meta.exact`, never a learned one), then deletes the file under the hook's lock
+  (non-blocking; skipped if the hook rewrote it). Nothing is recorded while Restore is off.
+- **The rule, by process** (`RestorePlan.verdict`, checked when planning and again before typing):
+  (a) the session's terminal process is dead, (b) the running Ghostty launched after the session
+  ended, (c) Claws saw that launch or started ≤ 2 min after it, (d) the tab's shell started ≤ 60 s
+  after it; then the tab exists under the entry's pane ID, its foreground is the tab's own login
+  shell (`RestorePane.problem`: shell, our uid, parent `login` or Ghostty, pgid = tty's foreground
+  group, on the pane's tty), and that shell's kernel cwd equals the session's folder (no stat or
+  realpath on project folders).
+- An entry goes when its session runs again, when its pane hosts another session, when its terminal
+  still runs 12 s after the end (also checked at start), after the one launch it was offered at (or a
+  launch Claws missed), after Not Now or a resume, and after 7 days. A plan that never settled
+  decides nothing.
+- On Ghostty's launch (`isFinishedLaunching`; a quit cancels the wait through a generation number)
+  `Restorer` polls once a second: the fast path (same list twice, every remembered tab at its shell)
+  needs a remembered tab present; else unchanged 5 s (10 s with none present); gives up at 30 s. It
+  asks in a non-activating floating panel (titles and folders, 5 then "and N more") that closes itself
+  after 2 minutes, unless `restoreWithoutAsking`. Typing: Ctrl-U (press + release), the command, Return;
+  a tab in front while you typed in the last 3 s waits (2 s steps, up to 2 minutes).
+- `restore.json` changes only under `restore.lock` (flock, re-read inside); IDs must be UUIDs
+  (`ResumeRequest.isSessionID`) on remember, load and typing. `--restore-run` without `--yes` writes
+  nothing; `--watch` refuses without its own `CLAWS_HOME`.
 
 ## Search (`Sources/Search/`, guide: docs/search.md)
 
