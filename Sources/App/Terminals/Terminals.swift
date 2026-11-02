@@ -159,15 +159,17 @@ protocol TerminalAdapter: AnyObject {
     // conversations that were running in them come back (docs/adapters.md, "Restore").
 
     /// True when the terminal reopens panes under their old IDs and this adapter implements
-    /// `restorablePanes` and `type(_:into:)`.
+    /// `restorablePanes` and `type`.
     var restoresPanes: Bool { get }
     /// The terminal's app: its launch starts a restore.
     var appBundleID: String? { get }
-    /// Worker. Every pane, with what runs in front of it. nil when the terminal cannot say.
-    func restorablePanes() -> [RestorePane]?
-    /// Worker. Clears the line, types `command` into the pane and presses Return, but only if `pid` is still
-    /// its foreground process. False if it is not, or if that did not work.
-    func type(_ command: String, into paneID: String, ifForeground pid: Int32) -> Bool
+    /// Worker. Every pane, with what runs in front of it, from the terminal process `app` (nil: any).
+    /// nil when the terminal cannot say, or another process of it runs now.
+    func restorablePanes(app: Int32?) -> [RestorePane]?
+    /// Worker. Clears the line, types `command` into the pane and presses Return, all in one call that
+    /// first checks the terminal is still process `app`, `shell` is still the pane's foreground process,
+    /// and, when `deferIfFocused` (you typed a moment ago), that the pane is not the one you are in.
+    func type(_ command: String, into paneID: String, app: Int32, ifForeground shell: Int32, deferIfFocused: Bool) -> TypeResult
     /// Worker. Why the terminal will not reopen its panes after a relaunch (a setting to change),
     /// or nil. Shown in Settings → General → Restore.
     func restoreProblem() -> String?
@@ -182,9 +184,32 @@ extension TerminalAdapter {
     var learnsPanes: Bool { false }
     var restoresPanes: Bool { false }
     var appBundleID: String? { scriptedBundleID }
-    func restorablePanes() -> [RestorePane]? { nil }
-    func type(_ command: String, into paneID: String, ifForeground pid: Int32) -> Bool { false }
+    func restorablePanes(app: Int32?) -> [RestorePane]? { nil }
+    func type(_ command: String, into paneID: String, app: Int32, ifForeground shell: Int32, deferIfFocused: Bool) -> TypeResult { .failed }
     func restoreProblem() -> String? { nil }
+}
+
+/// What typing a resume command did.
+enum TypeResult: Equatable {
+    case typed
+    /// Nothing was sent: the checked shell is no longer in front (or the terminal is another process
+    /// now), so look again.
+    case moved
+    /// Nothing was sent: you are typing in that pane; wait.
+    case busy
+    /// An error or a timeout part way: keys may have been sent. Never type into that pane again.
+    case failed
+
+    /// From a typing script's result: "ok", "moved", "busy"; anything else, or an error, is `failed`.
+    static func from(script result: String?, error: Int?) -> TypeResult {
+        guard error == nil else { return .failed }
+        switch result {
+        case "ok": return .typed
+        case "moved", "gone": return .moved
+        case "busy": return .busy
+        default: return .failed
+        }
+    }
 }
 
 // MARK: - The coordinator

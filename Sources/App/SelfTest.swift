@@ -135,7 +135,8 @@ enum SelfTest {
             ("Ghostty (tty, pid)", "com.mitchellh.ghostty",
              "tell application id \"com.mitchellh.ghostty\" to get {id, working directory, name, tty, pid} of every terminal"),
             ("Ghostty (type a command)", "com.mitchellh.ghostty",
-             GhosttyAdapter.typeScript(app: "com.mitchellh.ghostty", terminal: "AB12-CD34", pid: 4242, command: "claude --resume \"x\" \\ y")),
+             GhosttyAdapter.typeScript(app: "com.mitchellh.ghostty", terminal: "AB12-CD34", shell: 4242, deferIfFocused: true,
+                                       command: "claude --resume \"x\" \\ y")),
             ("Terminal (jump)", "com.apple.Terminal", AppleTerminalAdapter.focusScript(tty: "/dev/ttys001")),
             ("iTerm2 (jump)", "com.googlecode.iterm2", ITermAdapter.focusScript(tty: "/dev/ttys001")),
         ] where NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil {
@@ -177,8 +178,15 @@ enum SelfTest {
         var hosted: SessionState?
         _ = HookEvent.apply(ev("SessionStart", ["source": "startup"]), to: &hosted, now: 1, pid: 100, pidStart: 5, host: (900, 0.5), isAlive: alive)
         check("hook: records the terminal process the session runs under", hosted?.hostPid == 900 && hosted?.hostStart == 0.5)
-        _ = HookEvent.apply(ev("UserPromptSubmit"), to: &hosted, now: 2, pid: 100, pidStart: 5, host: (100, 5), isAlive: alive)
-        check("hook: a Claude process with no terminal above it is never its own host", hosted?.hostPid == 900)
+        _ = HookEvent.apply(ev("UserPromptSubmit"), to: &hosted, now: 2, pid: 100, pidStart: 5, host: (777, 3), isAlive: alive)
+        check("hook: a later event of the same process never rewrites the host (an orphan's late event)",
+              hosted?.hostPid == 900 && hosted?.hostStart == 0.5)
+        _ = HookEvent.apply(ev("SessionStart", ["source": "resume"]), to: &hosted, now: 3, pid: 300, pidStart: 6, host: (901, 2.5),
+                            isAlive: { _, _ in false })
+        check("hook: a new Claude process (a resume) records its own host", hosted?.hostPid == 901 && hosted?.hostStart == 2.5)
+        var orphan: SessionState?
+        _ = HookEvent.apply(ev("SessionStart", ["source": "startup"]), to: &orphan, now: 1, pid: 100, pidStart: 5, host: (100, 5), isAlive: alive)
+        check("hook: a Claude process with no terminal above it is never its own host", orphan?.hostPid == nil && orphan?.hostStart == nil)
         check("hook: the terminal process of this test is found", ProcInfo.hostAncestor(of: getpid()).map { $0.ppid <= 1 } == true)
 
         // The ledger: IDs, one entry per pane and session, expiry, the lock.
@@ -292,21 +300,34 @@ enum SelfTest {
         check("rule: a stamped entry is dropped at the next launch", v(e2, launch: RestorePlan.Launch(at: 400, observed: true)) == .otherLaunch
               && RestorePlan.spent(e2, .otherLaunch, launch: RestorePlan.Launch(at: 400, observed: true)))
 
-        // One tab's turn, right before typing.
-        func step(_ panes: [RestorePane]?, focused: Set<String> = [], idle: Double = 60, id: RestoreEntry = e) -> RestorePlan.Step {
-            RestorePlan.step(id, panes: panes, launch: launch, hostAlive: false, now: 300, template: "claude --resume {id}",
-                             focused: focused, keyboardIdle: idle)
+        // One tab's turn, right before typing, and what typing did.
+        func step(_ panes: [RestorePane]?, id: RestoreEntry = e) -> RestorePlan.Step {
+            RestorePlan.step(id, panes: panes, launch: launch, hostAlive: false, now: 300, template: "claude --resume {id}")
         }
         var withPid = pane()
         withPid.pid = 4242
         check("step: types into the checked shell, naming its pid",
               step([withPid]) == .type(command: "claude --resume \(e.sessionId)", foreground: 4242))
         check("step: no listing this time waits, it does not drop", step(nil) == .later)
-        check("step: you are typing in that tab: wait; it is in front but you are not typing: type",
-              step([withPid], focused: ["P"], idle: 1) == .later
-                && step([withPid], focused: ["P"], idle: 5) == .type(command: "claude --resume \(e.sessionId)", foreground: 4242))
         check("step: the rules still drop", step([withPid], id: entry(12, "Z", 100)) == .drop(RestorePlan.Verdict.noPane.why)
               && step([pane()]) == .drop("its shell is not known"))
+        check("typing: the script's answer decides; an error or timeout part way is never retried",
+              TypeResult.from(script: "ok", error: nil) == .typed && TypeResult.from(script: "moved", error: nil) == .moved
+                && TypeResult.from(script: "gone", error: nil) == .moved && TypeResult.from(script: "busy", error: nil) == .busy
+                && TypeResult.from(script: nil, error: -1712) == .failed && TypeResult.from(script: "ok", error: -1728) == .failed
+                && TypeResult.from(script: nil, error: nil) == .failed && TypeResult.from(script: "what", error: nil) == .failed)
+        check("typing: retry only when nothing was sent", RestorePlan.after(.typed) == .done && RestorePlan.after(.moved) == .retry
+              && RestorePlan.after(.busy) == .retry && RestorePlan.after(.failed) == .forget)
+        check("typing: only by keystrokes in the last 3 s", RestorePlan.recentlyTyped(idle: 1) && !RestorePlan.recentlyTyped(idle: 4))
+        check("typing: never into another Ghostty process than the launch's", GhosttyAdapter.sameProcess(40, 40)
+              && !GhosttyAdapter.sameProcess(41, 40) && GhosttyAdapter.sameProcess(41, nil))
+        var lateAlive = entry(13, "S", 250), lateDead = entry(14, "T", 250), lateStamped = entry(15, "U", 250)
+        lateStamped.launch = 150
+        let stampedNow = RestorePlan.stampedForRunning([lateAlive, lateDead, lateStamped], runningLaunch: 200, hostAlive: { $0.sessionId == lateAlive.sessionId })
+        check("remember: while its terminal already runs again, an entry gets that launch only (its host still running: no)",
+              stampedNow.map(\.launch) == [nil, 200, 150]
+                && RestorePlan.stampedForRunning([lateDead], runningLaunch: nil, hostAlive: { _ in false }).map(\.launch) == [nil])
+        lateAlive.launch = nil
         let mine = getpid(), myStart = ProcInfo.info(getpid())?.start
         var live = entry(9, "P", 100, host: mine)
         live.hostStart = myStart
@@ -315,8 +336,6 @@ enum SelfTest {
         check("rule: a terminal still running 12 s after the end outlived the session (Cmd-W, claude ended in an open tab)",
               RestorePlan.hostStayed(live, now: 113, alive: ProcInfo.isAlive) && !RestorePlan.hostStayed(live, now: 105, alive: ProcInfo.isAlive)
                 && !RestorePlan.hostStayed(gone, now: 113, alive: ProcInfo.isAlive))
-        check("rule: never type into the tab you are typing in", RestorePlan.mustDefer(pane: "P", focused: ["P"], idle: 1)
-              && !RestorePlan.mustDefer(pane: "P", focused: ["P"], idle: 4) && !RestorePlan.mustDefer(pane: "P", focused: ["Q"], idle: 0))
 
         // Settling.
         let starting = [pane(problem: "login is running")], ready = [pane()], other = [pane("X")]
@@ -359,17 +378,34 @@ enum SelfTest {
         m.list([PaneInfo(id: "B", cwd: "/w", name: "b", tty: "/dev/ttys002")], at: 300, host: 9)
         check("tty: a full listing forgets closed tabs", m.pane(tty: "/dev/ttys001", since: 0, host: 9) == nil
               && m.pane(tty: "/dev/ttys002", since: 250, host: 9) == "B")
-        let scripts = [GhosttyAdapter.listingScript(app: "x.y", withTTY: true), GhosttyAdapter.listingScript(app: "x.y", withTTY: false),
-                       GhosttyAdapter.focusedScript(app: "x.y", withTTY: true), GhosttyAdapter.focusScript(app: "x.y", terminal: "AB"),
-                       GhosttyAdapter.typeScript(app: "x.y", terminal: "AB", pid: 7, command: "c"),
-                       GhosttyAdapter.newPaneScript(app: "x.y", in: "/w", typing: "c")]
+        func scripts(_ app: String) -> [(String, String)] {
+            [("listing with tty", GhosttyAdapter.listingScript(app: app, withTTY: true)),
+             ("listing", GhosttyAdapter.listingScript(app: app, withTTY: false)),
+             ("focused tab with tty", GhosttyAdapter.focusedScript(app: app, withTTY: true)),
+             ("focused tab", GhosttyAdapter.focusedScript(app: app, withTTY: false)),
+             ("focus", GhosttyAdapter.focusScript(app: app, terminal: "AB12-CD34")),
+             ("typing", GhosttyAdapter.typeScript(app: app, terminal: "AB12-CD34", shell: 7, deferIfFocused: false, command: "c \"q\" \\ x")),
+             ("typing, deferring", GhosttyAdapter.typeScript(app: app, terminal: "AB12-CD34", shell: 7, deferIfFocused: true, command: "c")),
+             ("new tab", GhosttyAdapter.newPaneScript(app: app, in: "/w", typing: "c"))]
+        }
         check("ghostty: every script runs only while Ghostty is running (a quit one is never relaunched)",
-              scripts.allSatisfy { $0.hasPrefix("if application id \"x.y\" is running then") })
-        let typing = GhosttyAdapter.typeScript(app: "x.y", terminal: "AB", pid: 7, command: "c")
-        check("ghostty: typing checks the shell is still in front, then Ctrl-E, Ctrl-U, the command",
-              typing.contains("if (pid of t) is not 7 then return \"moved\"")
-                && typing.range(of: "send key \"e\"")!.lowerBound < typing.range(of: "send key \"u\"")!.lowerBound
-                && typing.range(of: "send key \"u\"")!.lowerBound < typing.range(of: "input text")!.lowerBound)
+              scripts("x.y").allSatisfy { $0.1.hasPrefix("if application id \"x.y\" is running then") })
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: GhosttyAdapter.bundleID) != nil {
+            // Compiling reads the dictionary from the app bundle and sends Ghostty nothing.
+            for (name, source) in scripts(GhosttyAdapter.bundleID) {
+                var err: NSDictionary?
+                check("applescript compiles against Ghostty's dictionary (guarded \(name))",
+                      NSAppleScript(source: source)?.compileAndReturnError(&err) == true, String(describing: err))
+            }
+        }
+        let typing = GhosttyAdapter.typeScript(app: "x.y", terminal: "AB", shell: 7, deferIfFocused: true, command: "c")
+        func at(_ s: String) -> String.Index { typing.range(of: s)!.lowerBound }
+        check("ghostty: one typing script checks the shell, then the focused tab, then Ctrl-E, Ctrl-U, the command",
+              typing.contains("if (pid of t) is not 7 then return \"moved\"") && typing.contains("is \"AB\" then return \"busy\"")
+                && at("return \"moved\"") < at("return \"busy\"") && at("return \"busy\"") < at("send key \"e\"")
+                && at("send key \"e\"") < at("send key \"u\"") && at("send key \"u\"") < at("input text") && typing.hasSuffix("return \"gone\""))
+        check("ghostty: no focus check while you are not typing",
+              !GhosttyAdapter.typeScript(app: "x.y", terminal: "AB", shell: 7, deferIfFocused: false, command: "c").contains("busy"))
         check("ghostty: window-save-state from +show-config", GhosttyAdapter.saveState("font-size = 13\nwindow-save-state = always\n") == "always"
               && GhosttyAdapter.saveState("font-size = 13\n") == nil)
         check("ghostty: version check", GhosttyAdapter.isBefore("1.3.1", [1, 4]) && !GhosttyAdapter.isBefore("1.4.0", [1, 4])
@@ -378,7 +414,8 @@ enum SelfTest {
         // Telling an app that is not running anything launches it: these return before any script.
         let absent = GhosttyAdapter(bundleID: "io.example.claws.not-installed")
         check("ghostty: never scripted unless running and done launching",
-              absent.list() == nil && absent.restorablePanes() == nil && !absent.type("x", into: "AB12", ifForeground: 1))
+              absent.list() == nil && absent.restorablePanes(app: nil) == nil
+                && absent.type("x", into: "AB12", app: 1, ifForeground: 1, deferIfFocused: false) == .moved)
         check("applescript: an undefined term is -2753 (Ghostty 1.3's missing tty), not a timeout",
               Script.attempt("return tty").error == Script.undefinedTerm)
     }

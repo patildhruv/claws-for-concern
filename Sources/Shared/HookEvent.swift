@@ -126,12 +126,18 @@ enum HookEvent {
         if let t = input["transcript_path"] as? String, !t.isEmpty { s.transcriptPath = t }
         if let m = input["permission_mode"] as? String { s.permissionMode = m }
         if let t = input["session_title"] as? String, !t.isEmpty { s.title = t }
-        if let pid, s.claudePid != pid { s.claudePid = pid; s.claudeStart = pidStart }
+        if let pid, s.claudePid != pid {
+            s.claudePid = pid
+            s.claudeStart = pidStart
+            // The host goes with the Claude process: recorded once, when that process first reports,
+            // so a late event after its terminal died (and it was orphaned) never rewrites it. A Claude
+            // process with no terminal above it (launchd is its parent) has no host.
+            s.hostPid = host.flatMap { $0.pid != pid ? $0.pid : nil }
+            s.hostStart = s.hostPid == nil ? nil : host?.start
+        }
         if let termProgram { s.termProgram = termProgram }
         if let terminal, !terminal.isEmpty { s.terminal = terminal }
         if let tty { s.tty = tty }
-        // A Claude process with no terminal above it (launchd is its parent) is not its own host.
-        if let host, host.pid != pid { s.hostPid = host.pid; s.hostStart = host.start }
 
         // PostToolUse fires on every tool call; only touch the file when something changed.
         if state != nil, s == before { return .ignore }

@@ -159,26 +159,41 @@ final class GhosttyAdapter: TerminalAdapter {
 
     /// Ghostty 1.4+ only (`tty` and `pid`): whether the tab's own shell waits at its prompt comes from
     /// the kernel's view of its foreground process.
-    func restorablePanes() -> [RestorePane]? {
-        guard let g = ready, let l = list(), hasTTY(g) == true else { return nil }
+    func restorablePanes(app pid: Int32?) -> [RestorePane]? {
+        guard let g = ready, GhosttyAdapter.sameProcess(g.processIdentifier, pid), let l = list(), hasTTY(g) == true else { return nil }
         return l.map { RestorePane.from(id: $0.id, tty: $0.tty, foregroundPid: $0.pid, hostPid: g.processIdentifier) }
     }
 
-    func type(_ command: String, into paneID: String, ifForeground pid: Int32) -> Bool {
-        guard ready != nil else { return false }
-        return Script.run(GhosttyAdapter.typeScript(app: app, terminal: paneID, pid: pid, command: command))?.stringValue == "ok"
+    func type(_ command: String, into paneID: String, app pid: Int32, ifForeground shell: Int32, deferIfFocused: Bool) -> TypeResult {
+        // A job queued before a quit and relaunch must not type into the new Ghostty.
+        guard let g = ready, GhosttyAdapter.sameProcess(g.processIdentifier, pid) else { return .moved }
+        let r = Script.attempt(GhosttyAdapter.typeScript(app: app, terminal: paneID, shell: shell, deferIfFocused: deferIfFocused, command: command))
+        return TypeResult.from(script: r.result?.stringValue, error: r.error)
     }
 
-    /// Types only while `pid` (the shell the restore checked) is still the tab's foreground process.
-    /// Ctrl-E then Ctrl-U (each pressed and released) clear the whole line: bash and fish kill only
-    /// what is left of the cursor. Then the command as if pasted, then Return.
-    static func typeScript(app: String, terminal: String, pid: Int32, command: String) -> String {
+    /// `expected` nil accepts any Ghostty process.
+    static func sameProcess(_ running: Int32, _ expected: Int32?) -> Bool { expected == nil || running == expected }
+
+    /// One script, so nothing can change between its checks and its keys: "moved" (nothing sent) unless
+    /// `shell` is still the tab's foreground process; with `deferIfFocused` (you typed a moment ago),
+    /// "busy" (nothing sent) while Ghostty is in front with that tab focused. Then Ctrl-E and Ctrl-U
+    /// (each pressed and released: bash and fish kill only what is left of the cursor), the command as
+    /// if pasted, Return, and "ok". "gone": Ghostty is not running. An error part way may have sent keys.
+    static func typeScript(app: String, terminal: String, shell: Int32, deferIfFocused: Bool, command: String) -> String {
         let safe = terminal.filter { $0.isHexDigit || $0 == "-" }
+        let focusCheck = deferIfFocused ? """
+            if frontmost then
+              if (count of windows) > 0 then
+                if (id of focused terminal of selected tab of front window) is "\(safe)" then return "busy"
+              end if
+            end if
+        """ : ""
         return guarded(app, """
         with timeout of 3 seconds
           tell application id \(Script.quote(app))
             set t to terminal id "\(safe)"
-            if (pid of t) is not \(pid) then return "moved"
+            if (pid of t) is not \(shell) then return "moved"
+        \(focusCheck)
             send key "e" action press modifiers "control" to t
             send key "e" action release modifiers "control" to t
             send key "u" action press modifiers "control" to t
@@ -188,7 +203,7 @@ final class GhosttyAdapter: TerminalAdapter {
           end tell
         end timeout
         return "ok"
-        """)
+        """) + "\nreturn \"gone\""
     }
 
     /// Ghostty brings its tabs back after quitting only with `window-save-state = always`; the

@@ -115,7 +115,7 @@ Optional members, with defaults:
 | `tracksSeenItself` | false | the terminal knows what you have seen (herdr's `done` vs `idle`): then no keyboard/mouse activity is required |
 | `learnsPanes`, `focusedPane(front:)`, `panes()` | false, nil, [] | nothing in the environment names the pane: the tracker learns it from the tab you type a prompt into, then by folder and title (Ghostty) |
 | `newPane(in:typing:)` | false | your terminal can open a new tab or pane in a folder and type into its shell: Search uses it to resume a session that is no longer running (see below) |
-| `restoresPanes`, `restorablePanes()`, `type(_:into:ifForeground:)` | false, nil, false | your terminal reopens its panes **under the same IDs** after it quits and relaunches: Restore resumes the sessions they were running (see below) |
+| `restoresPanes`, `restorablePanes(app:)`, `type(…)` | false, nil, `.failed` | your terminal reopens its panes **under the same IDs** after it quits and relaunches: Restore resumes the sessions they were running (see below) |
 | `appBundleID` | `scriptedBundleID` | Restore: the app whose launch starts a restore, if it is not the one you script |
 | `restoreProblem()` | nil | Restore: a setting the user must change before your terminal reopens its panes (shown in Settings → General → Restore) |
 
@@ -148,7 +148,7 @@ Put the script in a static function and compile it in `--selftest` (`NSAppleScri
 reads the app's dictionary without sending it anything), as `GhosttyAdapter.newPaneScript` is. Try it
 live in a throwaway terminal window, never one with sessions you care about.
 
-#### Restore: `restoresPanes`, `restorablePanes()`, `type(_:into:ifForeground:)`
+#### Restore: `restoresPanes`, `restorablePanes(app:)`, `type(_:into:app:ifForeground:deferIfFocused:)`
 
 When your terminal quits (or crashes, or the Mac restarts), the Claude Code sessions in its panes end
 with it. If it reopens those panes on its next launch, Restore types the user's resume command into
@@ -166,7 +166,7 @@ each one. All the bookkeeping is shared (`Sources/App/Restore.swift`):
   that settles decides (what ended before it and was not resumed is dropped); one that never settles,
   or reopens none of the remembered panes, stamps them with that launch so the next launch drops them;
   a launch Claws missed drops them at once.
-- When `appBundleID` launches, Restore polls `restorablePanes()` once a second until the list settles,
+- When `appBundleID` launches, Restore polls `restorablePanes(app:)` once a second until the list settles,
   then types into a pane only if it **exists under the entry's pane ID**, has **the tab's own login
   shell alone in front** (`RestorePane.problem`: a shell, the user's, started by the terminal or by a
   root `login` the terminal started, its group the tty's foreground group, on the pane's tty), and
@@ -177,15 +177,19 @@ each one. All the bookkeeping is shared (`Sources/App/Restore.swift`):
 What you implement, all on the worker:
 
 - `restoresPanes`: true. Your pane IDs must survive a relaunch: check that before anything else.
-- `restorablePanes()`: every pane with its tty and foreground process, or nil if the terminal cannot
-  say. If your terminal reports each pane's tty and foreground process group (as Ghostty's `pid` does),
-  `RestorePane.from(id:tty:foregroundPid:hostPid:)` fills in the rest. Return nil, not a guess, when
-  you cannot tell, and never script your app unless it runs and has finished launching (scripting an
-  app that is not running launches it). In AppleScript, also wrap the body in `if application id "…"
-  is running then … end if`: the running check you did a moment ago can be stale.
-- `type(_:into:ifForeground:)`: only if `pid` is still the pane's foreground process (check it in the
-  same script or call that types), clear the whole line (Ghostty: Ctrl-E, then Ctrl-U; bash and fish
-  kill only left of the cursor), type the command into that existing pane and press Return.
+- `restorablePanes(app:)`: every pane with its tty and foreground process, or nil if the terminal
+  cannot say, or if its running process is not `app` (a queued job must not reach a relaunched
+  terminal). If your terminal reports each pane's tty and foreground process group (as Ghostty's `pid`
+  does), `RestorePane.from(id:tty:foregroundPid:hostPid:)` fills in the rest. Return nil, not a guess,
+  when you cannot tell, and never script your app unless it runs and has finished launching (scripting
+  an app that is not running launches it). In AppleScript, also wrap the body in `if application id
+  "…" is running then … end if`: the running check you did a moment ago can be stale.
+- `type(_:into:app:ifForeground:deferIfFocused:)`: in one call or script, so nothing changes between
+  the checks and the keys: `.moved` (send nothing) unless the terminal is still process `app` and
+  `shell` is still the pane's foreground process; with `deferIfFocused`, `.busy` (send nothing) while
+  your app is frontmost with that pane focused; else clear the whole line (Ghostty: Ctrl-E, then
+  Ctrl-U; bash and fish kill only left of the cursor), type the command, press Return, `.typed`. Return
+  `.failed` for any error part way: keys may have been sent, and Restore never retries it.
 - `restoreProblem()`, optional: why the terminal will not reopen its panes (Ghostty: its
   `window-save-state` is not `always`). Bound any tool you run with `Command.run`, and cache the answer.
 

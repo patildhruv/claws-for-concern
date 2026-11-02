@@ -99,6 +99,10 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   (parent `login`, which runs as root under Ghostty); a script waiting on `read` (a zsh whose parent is
   the login shell); for `sleep 300 | cat`, `sleep`, not `cat`.
 - Ghostty's restored windows reopen with the tab that was selected at quit selected again.
+- `CGEventSource.secondsSinceLastEventType(.combinedSessionState, .keyDown)` tracks real keystrokes
+  without the Input Monitoring permission (8.1 s for keystrokes against 2.8 s for any input, no
+  prompt). Zero-distance pointer events posted to the HID tap reset only "any input": a focused tab
+  was typed into while the pointer had moved 0.1 s earlier.
 
 ## Traps (each cost real time)
 
@@ -208,11 +212,21 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   needs a remembered tab present; else unchanged 5 s (10 s with none present); gives up at 30 s. It
   asks in a non-activating floating panel (titles and folders, 5 then "and N more") that closes itself
   after 2 minutes, unless `restoreWithoutAsking`.
-- **Typing, one tab at a time, decided right before** (`RestorePlan.step`): list again (no answer:
-  wait), read the tab in front and the keyboard's idle time again (a tab in front while you typed in
-  the last 3 s waits; moving the pointer or clicking Resume does not count), and the script types
-  only if `pid of t` is still the checked shell: Ctrl-E, Ctrl-U (each press + release; bash and fish
-  kill only left of the cursor), the command, Return. Waiting tabs retry every 2 s for up to 2 minutes.
+- **Typing, one tab at a time, decided right before** (`RestorePlan.step`): list again from this
+  launch's Ghostty process (`Launch.pid`; another process, or no answer: wait). Then one script does
+  the rest, so nothing changes between its checks and its keys: "moved" unless `pid of t` is still
+  the checked shell; if you pressed a key in the last 3 s (read just before it; moving the pointer or
+  clicking Resume does not count), "busy" while Ghostty is frontmost with that tab focused; else
+  Ctrl-E, Ctrl-U (each press + release; bash and fish kill only left of the cursor), the command,
+  Return, "ok". "moved"/"busy" sent nothing and retry every 2 s for up to 2 minutes; an error or a
+  timeout may have sent keys, so that tab is forgotten, never retried (`TypeResult`).
+- **Known limits.** A vi keymap ignores Ctrl-E/Ctrl-U, so text already on the line can mangle the
+  typed one (nothing of ours runs but the resume command). `if application id … is running` is
+  checked once per script: a quit between that check and the next event is not covered. Two `--yes`
+  test runs on one scratch home share its ledger and may both act on it.
+- An entry `remember`ed while its terminal already runs again (a late SessionEnd, a reap after that
+  launch's restore looked) is stamped with that launch at once. Switching Restore off empties the
+  ledger (Claws stops watching launches). The hook records the host only with a new Claude process.
 - Every Ghostty script body sits inside `if application id … is running`: NSRunningApplication read
   off the main thread can lag a quit, and telling a quit app anything relaunches it.
 - Ghostty's tty map stores the Ghostty pid with each sighting and answers only for the session's own

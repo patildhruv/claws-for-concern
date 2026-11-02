@@ -35,8 +35,10 @@ defer { if lockFD >= 0 { flock(lockFD, LOCK_UN); close(lockFD) } }
 let url = Paths.sessions.appendingPathComponent("\(sid).json")
 var state = SessionState.load(url)
 let claude = ProcInfo.claudeAncestor(of: getppid())
-// SessionEnd keeps what an earlier event recorded; no need to walk the process tree for it.
-let host = json["hook_event_name"] as? String == "SessionEnd" ? nil : claude.flatMap { ProcInfo.hostAncestor(of: $0.pid) }
+// The host is recorded only with a new Claude process (HookEvent), and SessionEnd never records it:
+// otherwise there is no need to walk the process tree.
+let newProcess = claude.map { $0.pid != state?.claudePid } ?? false
+let host = json["hook_event_name"] as? String == "SessionEnd" || !newProcess ? nil : claude.flatMap { ProcInfo.hostAncestor(of: $0.pid) }
 
 switch HookEvent.apply(json, to: &state, now: Date().timeIntervalSince1970,
                        pid: claude?.pid, pidStart: claude?.start, processCwd: claude.flatMap { ProcInfo.cwd($0.pid) },

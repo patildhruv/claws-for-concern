@@ -94,6 +94,8 @@ enum RestorePlan {
         let at: Double
         /// Claws saw it launch, or started within `observeWindow` after it.
         let observed: Bool
+        /// Its process: listings and typing for this launch refuse any other Ghostty process.
+        var pid: Int32? = nil
     }
 
     static let observeWindow: Double = 120
@@ -164,24 +166,45 @@ enum RestorePlan {
         entries.filter { $0.launch == nil && $0.endedTs < launch.at }
     }
 
-    /// One tab's turn, decided right before typing into it.
+    /// One tab's turn, decided right before typing into it. Whether you are typing in it is decided by
+    /// the typing script itself, so the tab in front cannot change in between.
     enum Step: Equatable {
         case type(command: String, foreground: Int32)
-        /// Look again in a moment: the listing failed, or you are typing in that tab.
+        /// Look again in a moment: the terminal did not answer.
         case later
         case drop(String)
     }
 
     /// `panes` nil: the terminal did not answer this time, which says nothing about the tab.
-    static func step(_ e: RestoreEntry, panes: [RestorePane]?, launch: Launch, hostAlive: Bool?, now: Double, template: String,
-                     focused: Set<String>, keyboardIdle: Double) -> Step {
+    static func step(_ e: RestoreEntry, panes: [RestorePane]?, launch: Launch, hostAlive: Bool?, now: Double, template: String) -> Step {
         guard let panes else { return .later }
         let v = verdict(e, panes: panes, launch: launch, hostAlive: hostAlive, now: now)
         guard v == .resume else { return .drop(v.why) }
         guard let command = command(template, e) else { return .drop("its session ID is not a UUID") }
         guard let pid = panes.first(where: { $0.id == e.pane })?.pid else { return .drop("its shell is not known") }
-        if mustDefer(pane: e.pane, focused: focused, idle: keyboardIdle) { return .later }
         return .type(command: command, foreground: pid)
+    }
+
+    /// After typing: try again only when nothing was sent. An error part way may have sent keys.
+    enum After: Equatable { case done, retry, forget }
+
+    static func after(_ r: TypeResult) -> After {
+        switch r {
+        case .typed: return .done
+        case .moved, .busy: return .retry
+        case .failed: return .forget
+        }
+    }
+
+    /// The ledger entries `remember` adds while the terminal already runs again: SessionEnd or a reap
+    /// landing after a launch's restore looked. That launch is their only one (`launch`), as if offered.
+    static func stampedForRunning(_ entries: [RestoreEntry], runningLaunch: Double?, hostAlive: (RestoreEntry) -> Bool?) -> [RestoreEntry] {
+        guard let runningLaunch else { return entries }
+        return entries.map { e in
+            var e = e
+            if e.launch == nil, hostAlive(e) == false { e.launch = runningLaunch }
+            return e
+        }
     }
 
     /// The terminal process the session ran under still runs `hostWindow` after the end.
@@ -190,11 +213,9 @@ enum RestorePlan {
         return now - e.endedTs >= hostWindow && alive(pid, e.hostStart)
     }
 
-    /// Never type into the tab you are typing in.
-    /// `idle`: seconds since your last keystroke (moving the pointer or clicking Resume is not typing).
-    static func mustDefer(pane: String, focused: Set<String>, idle: Double) -> Bool {
-        focused.contains(pane) && idle < activeWindow
-    }
+    /// You pressed a key this recently (`idle`, seconds; moving the pointer or clicking Resume is not
+    /// typing): the typing script then sends nothing to a tab that is focused in front.
+    static func recentlyTyped(idle: Double) -> Bool { idle < activeWindow }
 
     /// The command to type, or nil when the session ID is not a UUID.
     static func command(_ template: String, _ e: RestoreEntry) -> String? {
@@ -282,6 +303,8 @@ final class Restorer {
         if !stale.isEmpty {
             forget(stale, why: "a week old, or the terminal it ran in is still running")
         }
+        clearIfOff()
+        NotificationCenter.default.addObserver(forName: .settingsChanged, object: nil, queue: .main) { [weak self] _ in self?.clearIfOff() }
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -322,13 +345,28 @@ final class Restorer {
         return NSRunningApplication.runningApplications(withBundleIdentifier: b).first { !$0.isTerminated }
     }
 
+    /// Restore switched off: Claws stops watching launches, so nothing remembered may come back when
+    /// it is switched on again, launches later.
+    private func clearIfOff() {
+        guard !enabled else { return }
+        let all = RestoreLedger.load().entries
+        if !all.isEmpty { forget(all, why: "Restore is off") }
+    }
+
     // Tracker hooks.
 
-    /// Sessions that ended with their tab: kept until their terminal reopens it.
+    /// Sessions that ended with their tab: kept until their terminal reopens it. One that lands while
+    /// its terminal already runs again (a late SessionEnd, a reap after that launch's restore looked)
+    /// gets that launch as its only one: Claws cannot see launches it was not running for.
     func remember(_ entries: [RestoreEntry]) {
-        let valid = entries.filter { ResumeRequest.isSessionID($0.sessionId) && $0.hostPid != nil }
-        guard !valid.isEmpty, enabled else { return }
-        write("remembered " + valid.map { "\($0.sessionId.prefix(8)) (\($0.reason), pane \($0.pane.prefix(8)))" }.joined(separator: ", ")) { l in
+        let checked = entries.filter { ResumeRequest.isSessionID($0.sessionId) && $0.hostPid != nil }
+        guard !checked.isEmpty, enabled else { return }
+        let valid = Dictionary(grouping: checked, by: \.adapter).flatMap { aid, group in
+            RestorePlan.stampedForRunning(group, runningLaunch: terminals.adapter(id: aid).flatMap(running)?.launchDate?.timeIntervalSince1970,
+                                          hostAlive: hostAlive)
+        }
+        write("remembered " + valid.map { "\($0.sessionId.prefix(8)) (\($0.reason), pane \($0.pane.prefix(8))"
+            + ($0.launch == nil ? ")" : "; its terminal already runs again: for that launch only)") }.joined(separator: ", ")) { l in
             valid.forEach { l.add($0) }
         }
         // Cmd-W, or claude ending in a tab that stays open: the terminal outlives the session.
@@ -365,7 +403,8 @@ final class Restorer {
         let mine = RestoreLedger.load().entries.filter { $0.adapter == a.id }
         guard !mine.isEmpty else { return false }
         let launch = RestorePlan.Launch(at: at, observed: RestorePlan.observed(launchAt: at, sawLaunch: sawLaunch.contains(app.processIdentifier),
-                                                                               startedAt: startedAt))
+                                                                               startedAt: startedAt),
+                                        pid: app.processIdentifier)
         guard launch.observed else {
             // Claws was not there when this terminal started: its tabs have been yours since.
             let spent = mine.filter { $0.endedTs < at }
@@ -381,7 +420,7 @@ final class Restorer {
         func look() {
             terminals.worker.run {
                 if let b = a.scriptedBundleID { Automation.refresh(b) }
-                let panes = self.permitted(a) ? a.restorablePanes() : nil
+                let panes = self.permitted(a) ? a.restorablePanes(app: launch.pid) : nil
                 DispatchQueue.main.async {
                     guard self.generation[a.id] == gen else { return }
                     switch wait.look(panes, at: Date().timeIntervalSince1970, watching: ids) {
@@ -474,9 +513,10 @@ final class Restorer {
     }
 
     /// Types the resume command into one tab at a time, each decided right before its typing: the
-    /// tabs are listed again, which tab is in front and when you last typed are read again, and the
-    /// script types only while the checked shell is still in front. A tab whose turn must wait (no
-    /// answer from the terminal, or you are typing in it) is tried again every 2 s until `deadline`.
+    /// tabs are listed again from this launch's Ghostty process, and the typing script itself checks
+    /// that the checked shell is still in front and, if you pressed a key in the last 3 s, that the tab
+    /// is not the one you are in. Nothing sent ("moved", "busy", no answer): tried again every 2 s
+    /// until `deadline`. An error part way may have sent keys: that tab is never typed into again.
     private func resume(_ a: TerminalAdapter, _ queue: [RestoreEntry], later: [RestoreEntry] = [], launch: RestorePlan.Launch,
                         gen: Int, until deadline: Double) {
         guard generation[a.id] == gen else { return }
@@ -487,40 +527,42 @@ final class Restorer {
                 underWay.remove(a.id)
                 return
             }
-            log("waiting: " + later.map { "\($0.sessionId.prefix(8))" }.joined(separator: ", ") + " (you are typing in that tab, or the terminal did not answer)")
+            log("waiting: " + later.map { "\($0.sessionId.prefix(8))" }.joined(separator: ", "))
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.resume(a, later, launch: launch, gen: gen, until: deadline) }
             return
         }
         let rest = Array(queue.dropFirst())
         let template = commandOverride ?? Settings.resumeCommand
-        let front = Terminals.front
         terminals.worker.run {
-            let panes = a.restorablePanes()
-            let focused = a.lookedAt(front: front)
-            let idle = self.idleSeconds()
+            let panes = a.restorablePanes(app: launch.pid)
             let step = RestorePlan.step(e, panes: panes, launch: launch, hostAlive: self.hostAlive(e), now: Date().timeIntervalSince1970,
-                                        template: template, focused: focused, keyboardIdle: idle)
-            var typed = false
-            if case let .type(command, pid) = step { typed = a.type(command, into: e.pane, ifForeground: pid) }
+                                        template: template)
+            var result: TypeResult?
+            var idle = 0.0
+            if case let .type(command, shell) = step, let pid = launch.pid {
+                idle = self.idleSeconds()
+                result = a.type(command, into: e.pane, app: pid, ifForeground: shell, deferIfFocused: RestorePlan.recentlyTyped(idle: idle))
+            }
             DispatchQueue.main.async {
-                switch step {
-                case .later:
-                    self.log("\(e.sessionId.prefix(8)): later (" + (panes == nil ? "no answer from \(a.name)"
-                        : String(format: "its tab in front, last keystroke %.1f s ago, any input %.1f s ago", idle, Presence.idleSeconds)) + ")")
+                let id = "\(e.sessionId.prefix(8))"
+                let typing = String(format: "last keystroke %.1f s ago, any input %.1f s ago", idle, Presence.idleSeconds)
+                switch (step, result.map(RestorePlan.after)) {
+                case (.later, _):
+                    self.log("\(id): later (no answer from \(a.name))")
                     self.resume(a, rest, later: later + [e], launch: launch, gen: gen, until: deadline)
-                case .drop(let why):
+                case (.drop(let why), _):
                     self.forget([e], why: "not resumed, " + why)
                     self.resume(a, rest, later: later, launch: launch, gen: gen, until: deadline)
-                case .type where typed:
-                    self.log("\(e.sessionId.prefix(8)): resumed in pane \(e.pane.prefix(8))"
-                             + (focused.contains(e.pane) ? String(format: " (its tab in front, last keystroke %.1f s ago, any input %.1f s ago)",
-                                                                 idle, Presence.idleSeconds) : ""))
+                case (.type, .done?):
+                    self.log("\(id): resumed in pane \(e.pane.prefix(8)) (\(typing))")
                     self.forget([e], why: nil)
                     self.resume(a, rest, later: later, launch: launch, gen: gen, until: deadline)
-                case .type:
-                    // The shell is no longer the one checked, or the terminal did not answer: decide again.
-                    self.log("\(e.sessionId.prefix(8)): not typed (its tab changed, or the terminal did not answer)")
+                case (.type, .retry?), (.type, nil):
+                    self.log("\(id): nothing sent (" + (result == .busy ? "you are typing in that tab: \(typing)" : "its shell or its Ghostty changed") + ")")
                     self.resume(a, rest, later: later + [e], launch: launch, gen: gen, until: deadline)
+                case (.type, .forget?):
+                    self.forget([e], why: "typing failed part way (keys may have been sent); never typing into that tab again")
+                    self.resume(a, rest, later: later, launch: launch, gen: gen, until: deadline)
                 }
             }
         }
@@ -725,7 +767,7 @@ enum RestoreCLI {
             guard let app = Restorer.shared.running(a), let at = app.launchDate?.timeIntervalSince1970 else { print("  not running"); continue }
             Automation.refresh(b)
             guard Automation.cached(b) == .granted else { print("  not allowed to script it (Automation)"); continue }
-            guard let panes = a.restorablePanes() else { print("  could not list its tabs (needs Ghostty 1.4 or later, done launching)"); continue }
+            guard let panes = a.restorablePanes(app: nil) else { print("  could not list its tabs (needs Ghostty 1.4 or later, done launching)"); continue }
             let launch = RestorePlan.Launch(at: at, observed: RestorePlan.observed(launchAt: at, sawLaunch: false, startedAt: now))
             print("  pid \(app.processIdentifier), launched \(age(now - at)) ago (\(launch.observed ? "within" : "more than") 2 minutes before this check), \(panes.count) terminal\(panes.count == 1 ? "" : "s")")
             for p in panes {
