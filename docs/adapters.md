@@ -34,7 +34,7 @@ helpers) and the adapter closest to yours:
 | --- | --- |
 | a CLI with pane IDs in the shell's environment | `MultiplexerAdapters.swift` (tmux, herdr), `CmuxAdapter.swift` |
 | AppleScript with a `tty` per tab | `AppleScriptTerminals.swift` (iTerm2, Terminal) |
-| AppleScript, but no IDs in the environment and no `tty` | `GhosttyAdapter.swift` (learns panes) |
+| AppleScript, no IDs in the environment, a `tty` per tab only in newer versions | `GhosttyAdapter.swift` (maps by tty on 1.4+ from a snapshot of its listings, learns panes on 1.3) |
 
 ## Step by step
 
@@ -115,6 +115,9 @@ Optional members, with defaults:
 | `tracksSeenItself` | false | the terminal knows what you have seen (herdr's `done` vs `idle`): then no keyboard/mouse activity is required |
 | `learnsPanes`, `focusedPane(front:)`, `panes()` | false, nil, [] | nothing in the environment names the pane: the tracker learns it from the tab you type a prompt into, then by folder and title (Ghostty) |
 | `newPane(in:typing:)` | false | your terminal can open a new tab or pane in a folder and type into its shell: Search uses it to resume a session that is no longer running (see below) |
+| `restoresPanes`, `restorablePanes()`, `type(_:into:)` | false, nil, false | your terminal reopens its panes **under the same IDs** after it quits and relaunches: Restore resumes the sessions they were running (see below) |
+| `appBundleID` | `scriptedBundleID` | Restore: the app whose launch starts a restore, if it is not the one you script |
+| `restoreProblem()` | nil | Restore: a setting the user must change before your terminal reopens its panes (shown in Settings → General → Restore) |
 
 #### `newPane(in:typing:)`
 
@@ -141,6 +144,39 @@ end tell
 Put the script in a static function and compile it in `--selftest` (`NSAppleScript.compileAndReturnError`
 reads the app's dictionary without sending it anything), as `GhosttyAdapter.newPaneScript` is. Try it
 live in a throwaway terminal window, never one with sessions you care about.
+
+#### Restore: `restoresPanes`, `restorablePanes()`, `type(_:into:)`
+
+When your terminal quits (or crashes, or the Mac restarts), the Claude Code sessions in its panes end
+with it. If it reopens those panes on its next launch, Restore types the user's resume command into
+each one. All the bookkeeping is shared (`Sources/App/Restore.swift`):
+
+- The hook marks a session ended when SessionEnd's `reason` is not a deliberate exit; the tracker moves
+  it, with the pane ID your `paneID(for:)` (or learning) gave it, into the restore ledger.
+- An entry is dropped if the terminal process that hosted the session is still running 12 s after
+  the end (a tab closed, or claude ended in a pane that stayed open): Restore is for a terminal that
+  went away. It is also dropped after the relaunch that did not bring its pane back, after a week, and
+  once its pane hosts another session.
+- When `appBundleID` launches (or runs when Claws starts), Restore polls `restorablePanes()` once a
+  second until the list settles, then types into a pane only if it **exists under the entry's pane
+  ID**, has **a shell in front** (`atShell`), **started after the session ended** (`started`: so it
+  was reopened, not left open), and is **in the session's folder** (symlinks resolved).
+
+What you implement, all on the worker:
+
+- `restoresPanes`: true. Your pane IDs must survive a relaunch: check that before anything else.
+- `restorablePanes()`: every pane with its folder and foreground process, or nil if the terminal
+  cannot say. If your terminal reports each pane's foreground PID, `RestorePane.from(id:cwd:foregroundPid:)`
+  fills in the rest (shell or not, start time). Return nil, not a guess, when you cannot tell.
+- `type(_:into:)`: type the command into that existing pane and press Return. Restore calls it only
+  after the checks above, and checks again right before (the user may have used the tab meanwhile).
+- `restoreProblem()`, optional: why the terminal will not reopen its panes (Ghostty: its
+  `window-save-state` is not `always`). Bound any tool you run with `Command.run`.
+
+Test it against a **copy** of your terminal under another bundle ID, never the one with your sessions:
+`--restore-status` shows the ledger and what Restore would do with each entry, `--watch` runs the
+tracker and Restore without the menu bar app (printing each step), and `--restore-run [--yes]` runs a
+restore now. For Ghostty, `--bundle-id <copy's ID>` points the adapter at the copy.
 
 ### 4. Register it
 

@@ -3,17 +3,18 @@
 | File | Responsibility |
 | --- | --- |
 | `Sources/Shared/SessionState.swift` | `Paths` (support folder layout), `SessionStatus`, `SessionState` (the per-session JSON the hook writes, atomic save), `ProcInfo` (sysctl process info, finding the Claude process, liveness) |
-| `Sources/Shared/HookEvent.swift` | Pure state transitions for each hook event; describes questions, permission requests, plans and failures |
+| `Sources/Shared/HookEvent.swift` | Pure state transitions for each hook event (SessionEnd: deliberate exits delete, others mark the session ended); describes questions, permission requests, plans and failures |
 | `Sources/Hook/main.swift` | `claws-for-concern-hook`: reads the event on stdin, flocks, applies `HookEvent`, writes or deletes the session file, exits 0 |
-| `Sources/App/App.swift` | `@main`, `AppDelegate` (launch, first-run alert, hooks/permission/art flows, hot key), `CLI` commands |
-| `Sources/App/Tracker.swift` | The model: reads session files, decides which sessions get a Clawd, asks the terminal adapters where each session is and what you are looking at, clears Clawds you have seen, recaps, demo Clawds, reaping dead sessions |
+| `Sources/App/App.swift` | `@main`, `AppDelegate` (launch, first-run alert, hooks/permission/art flows, hot key, starts `Restorer`), `CLI` commands |
+| `Sources/App/Tracker.swift` | The model: reads session files, decides which sessions get a Clawd, asks the terminal adapters where each session is and what you are looking at, clears Clawds you have seen, recaps, demo Clawds; hands ended and vanished sessions to the restore ledger; `headless` mode for `--watch` |
+| `Sources/App/Restore.swift` | Restore: `RestoreEntry`/`RestoreLedger` (restore.json), `RestorePlan` (the safety rules, pure), `RestoreWait` (tabs settled), `Restorer` (launch observer, ask, type the resume command), `RestorePrompt` (the panel), `RestoreCLI` (`--restore-status`, `--restore-run`, `--watch`) |
 | `Sources/Shared/TerminalContext.swift` | The allow-list of terminal environment variables the hook records; tty and process-list helpers |
-| `Sources/App/Terminals/Terminals.swift` | The `TerminalAdapter` protocol, the `Terminals` coordinator (registry, worker thread, polling, snapshots, open, `newPane`: launch + permission, then the adapter's new pane), `Automation` permissions, `Script`, `Command`, `HostApp`, `ScriptThread`, `Presence` |
-| `Sources/App/Terminals/GhosttyAdapter.swift` | Ghostty (learns panes over AppleScript; new tabs for Search) and `HostAppAdapter` (the fallback: bring the hosting app forward) |
+| `Sources/App/Terminals/Terminals.swift` | The `TerminalAdapter` protocol (and `PaneInfo`, `RestorePane`), the `Terminals` coordinator (registry, worker thread, polling, snapshots, open, `newPane`: launch + permission, then the adapter's new pane), `Automation` permissions, `Script`, `Command`, `HostApp`, `ScriptThread`, `Presence` |
+| `Sources/App/Terminals/GhosttyAdapter.swift` | Ghostty (tabs by tty on 1.4+ via `TTYMap`, learns panes on 1.3; restore: panes, typing, `window-save-state`; new tabs for Search) and `HostAppAdapter` (the fallback: bring the hosting app forward) |
 | `Sources/App/Terminals/MultiplexerAdapters.swift` | tmux and herdr |
 | `Sources/App/Terminals/CmuxAdapter.swift` | cmux (CLI, socket modes) |
 | `Sources/App/Terminals/AppleScriptTerminals.swift` | iTerm2 and Terminal (matched by tty) |
-| `Sources/App/Terminals/Diagnostics.swift` | `--terminals`, `--open-session` |
+| `Sources/App/Terminals/Diagnostics.swift` | `--terminals` (lists Ghostty once, so tabs show by tty), `--open-session` |
 | `Sources/App/Summarizer.swift` | One-line recaps via `claude -p --model haiku` (clean env, timeouts), text cleanup and fallback; `AppLog` |
 | `Sources/App/Overlay.swift` | `Placement`/`Placements` (per-display spot), `StripGeometry` (pure layout and snapping), `OverlayController` (the strip: follow-the-pointer, drag, animated relayout, overflow, hover/click/menus), `StripPanel`, `StripItem`, `ClawdCell` (sprite, badge, VoiceOver), `OverflowChip`, `BlockItem` |
 | `Sources/App/Bubble.swift` | The thought bubble panel and view: text measuring, tail, light/dark drawing |

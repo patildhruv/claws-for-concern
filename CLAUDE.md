@@ -23,6 +23,10 @@ $B --fetch-art              # download + convert the Clawd GIFs now, print sprit
 $B --install-hooks | --remove-hooks | --hooks-status
 $B --terminals              # each live session: its terminal adapter, pane, "looking at it"; adapter health
 $B --open-session <id>      # the click path for one session (an ID prefix is enough)
+$B --restore-status         # the restore ledger, the terminal's panes, and the verdict for each entry
+$B --restore-run [--yes] [--command T]   # the app's restore, now (--yes: type without asking)
+$B --watch [--yes] [--seconds N] [--command T]   # tracker + restore without the UI, printing each step
+                            # (restore commands: --bundle-id ID drives a Ghostty copy; CLAWS_HOME=dir isolates data)
 $B --displays               # each display's UUID and saved spot
 $B --open-settings [TAB]    # opens the running app's Settings on a tab (distributed notification)
 $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps it (needs ffmpeg)
@@ -66,6 +70,25 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
 - Every official Clawd GIF is a 55 x 37 art-pixel canvas (2750 x 1850 at 50 px, 1189 x 800 at ~21.6 px).
   ImageIO composites GIF frames: the Swift converter matched an ffmpeg pipeline in frame count, crop and timing for all 12 GIFs (pixels not diffed).
 
+## Verified facts for Restore (Claude Code 2.1.316, Ghostty 1.4.0, macOS 27.0.1, 2026-11-02)
+
+- Ghostty 1.4 `terminal` adds `tty` ("/dev/ttys014") and `pid` (the foreground process: claude while it
+  runs, the login shell when idle), plus `input text … to`, `send key … to`, `close`, `new tab … with
+  configuration {initial working directory:, initial input:}`. 1.3 has no `tty`/`pid`.
+- Ghostty's `tty` equals the tty the hook records from the Claude process: all 14 live sessions mapped
+  to the same terminal IDs as Ghostty's own `{id, tty}` listing.
+- With `window-save-state = always`, terminal IDs survive quit + relaunch (titles do not). The default
+  `default` follows macOS "Close windows when quitting", so Settings warns unless it is `always`
+  (`ghostty +show-config --no-pager` prints only changed keys; absent means `default`).
+- SessionEnd `reason` values in the 2.1.316 schema: `clear`, `resume`, `logout`, `prompt_input_exit`,
+  `other`. Observed: Cmd-Q of Ghostty, Cmd-W (`close` of the terminal) and SIGTERM to claude all give
+  `other`; Ctrl-C twice at an empty prompt gives `prompt_input_exit`; `/exit` gives
+  `prompt_input_exit`. Ctrl-D at an empty prompt (three presses) did not end the session at all.
+  `kill -9` sends nothing (the tracker reaps it as `vanished`). The SessionEnd hook runs on quit.
+- `input text` + `send key "enter"` into a reopened terminal ran `claude --resume <id>` in its folder:
+  the same session ID came back from a new process. `send key` with `modifiers "control"` needs a
+  `press` and a `release` once Claude Code runs (a lone press did nothing).
+
 ## Traps (each cost real time)
 
 - **`claude -p` for recaps**: `--bare` skips hooks but refuses OAuth (API key only), so use
@@ -96,6 +119,16 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   `OverlayController.freshPanel()` runs on every follow move and after any drag that touched another
   display. Bare test panels never broke, so the cause inside macOS is unknown.
 - Gatekeeper: releases are ad-hoc signed, not notarized; README tells users to right-click → Open.
+- **A tty is reused once its terminal closes.** `TTYMap` trusts a tty → terminal sighting only if it
+  was made after the session's Claude process started; a full listing replaces the map.
+- **Test restore against a copy of Ghostty, never the real one** (it runs the user's sessions): a
+  `ditto` copy with its own `CFBundleIdentifier`, ad-hoc signed, launched with `env -i` and its own
+  `XDG_CONFIG_HOME`, driven with `--bundle-id`. Test sessions: `claude --setting-sources project,local
+  --settings <scratch file with our hooks>` with `CLAWS_HOME` set, so the real hooks and the real Claws
+  never see them. A fresh copy raises the Automation prompt again. Its reopened windows come back
+  under that bundle ID from an earlier run: not stored in `~/Library/Preferences` or `var/folders`
+  (location not found; `~/Library/Saved Application State` does not exist on macOS 27).
+- **`print` from the CLI to a file is block-buffered**: `--watch` looked silent. `RestoreCLI` line-buffers stdout.
 
 ## Terminal adapters (`Sources/App/Terminals/`, guide: docs/adapters.md)
 
@@ -124,6 +157,29 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   - **iTerm2 / Terminal**: matched by the session's `tty` (iTerm2 `tty of session`, Terminal `tty of
     tab`). Both need Automation; the app asks the first time one of their sessions gets a Clawd.
     Scripts compile against the dictionaries in `--selftest`; not exercised live (needs consent).
+- **Ghostty 1.4+** (verified 2026-11-02): the listing and the focused-tab query ask for `tty` too; the
+  adapter keeps a `TTYMap` that `paneID(for:)` reads on the main thread, and the tracker stores the
+  result like a learned pane so it survives an app restart. The tracker lists Ghostty once for each
+  new session without a pane (restore needs every session's tab, not only those with a Clawd). If the
+  query with `tty` fails where the old one answers (1.3), that Ghostty process gets the old learning path.
+
+## Restore (`Sources/App/Restore.swift`, guide: docs/adapters.md "Restore")
+
+- The hook keeps a session marked ended (`end_reason`, `ended_ts`) unless SessionEnd's reason is
+  deliberate (`HookEvent.deliberateEnds`); after that only a SessionStart (or a new process) revives
+  it. The tracker moves ended sessions, and sessions whose process vanished (`reason: vanished`,
+  ended = last update), into `restore.json` with their pane ID, then deletes the file under the hook's
+  lock (non-blocking; skipped if the hook rewrote it).
+- An entry goes when its session runs again, when its pane hosts another session, 12 s after it was
+  remembered if the Ghostty process that hosted it (launched before its Claude process) still runs
+  (Cmd-W, claude ended in an open tab), after the relaunch that did not bring its tab back, after Not
+  Now or a resume, and after 7 days.
+- On Ghostty's launch (or at app start with Ghostty running) `Restorer` polls the panes once a second
+  until settled (same list twice with every remembered pane at a shell, or unchanged 5 s, at most
+  30 s), then types `Settings.resumeCommand` only into a pane that exists under the entry's ID, has a
+  shell in front, started after the session ended, and is in its folder (realpath). It asks first in
+  a non-activating floating panel (titles and folders, 5 then "and N more"), unless
+  `restoreWithoutAsking`; it checks each pane again right before typing.
 
 ## Search (`Sources/Search/`, guide: docs/search.md)
 
@@ -167,8 +223,10 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
 ## Data
 
 `~/Library/Application Support/Claws for Concern/`: `sessions/<id>.json` (hook-written state, one per
-live session, `.lock` for flock), `app-state.json` (tab mapping, what was seen, recap cache),
-`art/` (sprites.json + PNG strips), `extra-art.txt`, `summarizer/` (empty cwd), `claws.log`.
+live session, `.lock` for flock; an ended one waits there for the app), `app-state.json` (tab mapping,
+what was seen, recap cache), `restore.json` (the restore ledger, app-only, not pruned with
+app-state), `art/` (sprites.json + PNG strips), `extra-art.txt`, `summarizer/` (empty cwd), `claws.log`
+(restore steps are logged as `restore: …`).
 Session ownership: the hook records the Claude process that started a session (`claude_pid`) and
 ignores events from any other live Claude process under the same ID: a `claude` run inside a session
 inherits `CLAUDE_CODE_SESSION_ID`, and its events once reset this session's state.
