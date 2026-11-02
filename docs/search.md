@@ -167,6 +167,16 @@ On 2026-11-02 (2.1.316) the self-test still resolves 543 of 545 sessions to thei
   with `lstat` and `destinationOfSymbolicLink` (which never follow a link), and only once the text
   says the whole path is outside every protected folder. Claws' folder check reads only inside
   `~/.claude/projects`. Reading `~/.claude` is fine.
+- **Gatekeeper and the helper.** A downloaded (quarantined) ad-hoc release marks every file, the
+  helper's too; approving Claws (right-click → Open) may leave the helper refused when it opens. At
+  launch Claws removes `com.apple.quarantine` from the helper and everything in it (`Quarantine.clear`:
+  `removexattr`, `XATTR_NOFOLLOW`, never a link followed), logging one line when it did: Claws running
+  means you approved the bundle around it. If the helper still fails to open, an alert says so, gives
+  macOS's reason and offers `xattr -dr com.apple.quarantine "<Claws for Concern.app>"` with a Copy
+  button. Checked on copies of the build: `codesign --verify --deep --strict` passes with the mark (on
+  the helper only, and on all 20 items) and after it is removed: the mark is not part of the signature.
+  Not checked: the refusal itself, as Gatekeeper's assessment is switched off on the Mac this was built
+  on (`spctl --assess` answers `override=security disabled`); try a real download on a stock Mac.
 - **`standardizingPath` looks on disk**: it turns an existing `/private/tmp/…` into `/tmp/…`, so the
   request's folder is checked for `.`, `..`, `//` and a trailing `/` by its components instead (two
   real projects here live under `/private`).

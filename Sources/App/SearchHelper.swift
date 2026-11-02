@@ -28,6 +28,7 @@ enum SearchHelper {
                 guard let pid = app?.processIdentifier else {
                     nonces[nonce] = nil
                     AppLog.write("search: could not open the helper: \(error?.localizedDescription ?? "no app")")
+                    couldNotOpen(error)
                     return
                 }
                 // Already running: it kept its own nonce, and this one never reached it.
@@ -35,6 +36,56 @@ enum SearchHelper {
                 nonces[nonce] = known ? nil : pid
             }
         }
+    }
+
+    // MARK: Gatekeeper
+
+    /// At launch. A downloaded release carries the quarantine mark on every file; approving Claws
+    /// (right-click → Open) lets Claws run, but the helper inside it may still be refused when it opens.
+    /// Claws running means you approved the bundle that holds the helper, so the mark comes off the
+    /// helper (only). Logged once when it does.
+    static func clearQuarantine() {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let r = Quarantine.clear(url)
+        if r.removed > 0 { AppLog.write("search: removed the quarantine mark from \(r.removed) item(s) of the search helper") }
+        if !r.failed.isEmpty { AppLog.write("search: could not remove the quarantine mark: \(r.failed.prefix(3).joined(separator: "; "))") }
+    }
+
+    /// No silent failure: say Search could not open, why, and how to unblock it.
+    private static func couldNotOpen(_ error: Error?) {
+        let command = unquarantineCommand(appPath: Bundle.main.bundlePath)
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = "Search couldn't open"
+        a.informativeText = failureText(error)
+        let field = NSTextField(wrappingLabelWithString: command)
+        field.isSelectable = true
+        field.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        field.preferredMaxLayoutWidth = 360
+        field.frame.size = field.fittingSize
+        a.accessoryView = field
+        a.addButton(withTitle: "Copy Command")
+        a.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        if a.runModal() == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(command, forType: .string)
+        }
+    }
+
+    static func failureText(_ error: Error?) -> String {
+        let reason = error.map { $0.localizedDescription } ?? "macOS gave no reason."
+        return reason + "\n\nIf macOS is blocking it as downloaded from the internet, run this in Terminal, then try again:"
+    }
+
+    /// `xattr -dr com.apple.quarantine "<app>"`, the path quoted for the shell.
+    static func unquarantineCommand(appPath: String) -> String {
+        var quoted = ""
+        for c in appPath {
+            if "\"\\$`".contains(c) { quoted.append("\\") }
+            quoted.append(c)
+        }
+        return "xattr -dr \(Quarantine.name) \"\(quoted)\""
     }
 
     /// Main thread, once at launch.
@@ -163,6 +214,36 @@ enum SearchHelper {
     private static func abbreviate(_ path: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return path == home ? "~" : path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+}
+
+/// The mark macOS puts on downloaded files (`com.apple.quarantine`), which makes Gatekeeper check an app
+/// the first time it opens.
+enum Quarantine {
+    static let name = "com.apple.quarantine"
+
+    /// Removes the mark from `url` and everything inside it, never following a link (so nothing outside
+    /// is touched). Returns how many items had it, and what could not be cleared.
+    static func clear(_ url: URL) -> (removed: Int, failed: [String]) {
+        var removed = 0
+        var failed: [String] = []
+        func clearOne(_ path: String) {
+            guard getxattr(path, name, nil, 0, 0, XATTR_NOFOLLOW) >= 0 else { return }
+            if removexattr(path, name, XATTR_NOFOLLOW) == 0 { removed += 1 } else { failed.append("\(path): \(String(cString: strerror(errno)))") }
+        }
+        clearOne(url.path)
+        let items = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil, options: [], errorHandler: nil)
+        while let item = items?.nextObject() as? URL { clearOne(item.path) }
+        return (removed, failed)
+    }
+
+    /// True if `url` or anything inside it carries the mark.
+    static func present(_ url: URL) -> Bool {
+        func has(_ path: String) -> Bool { getxattr(path, name, nil, 0, 0, XATTR_NOFOLLOW) >= 0 }
+        if has(url.path) { return true }
+        let items = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil, options: [], errorHandler: nil)
+        while let item = items?.nextObject() as? URL { if has(item.path) { return true } }
+        return false
     }
 }
 

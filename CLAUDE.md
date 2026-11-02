@@ -32,6 +32,7 @@ $B --watch [--yes] [--seconds N] [--command T]   # tracker + restore without the
                             #  never retried; --no-ghostty-scripting: no Apple Events to Ghostty at all)
 $B --displays               # each display's UUID and saved spot
 $B --open-settings [TAB]    # opens the running app's Settings on a tab (distributed notification)
+$B --clear-quarantine       # take com.apple.quarantine off the bundled search helper, as launch does
 $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps it (needs ffmpeg)
 $B --snapshot-settings DIR  # every Settings pane, offscreen (switches render "off" there: use the real window)
 ```
@@ -144,6 +145,11 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   `OverlayController.freshPanel()` runs on every follow move and after any drag that touched another
   display. Bare test panels never broke, so the cause inside macOS is unknown.
 - Gatekeeper: releases are ad-hoc signed, not notarized; README tells users to right-click → Open.
+  The nested search helper keeps its own quarantine mark: Claws removes it at launch
+  (`SearchHelper.clearQuarantine`), and a helper that still will not open gets an alert with the
+  `xattr -dr` command, never silence. The mark does not affect `codesign --verify --deep --strict`.
+  This Mac has Gatekeeper's assessment off (`spctl`: `override=security disabled`): the refusal itself
+  can only be tested on another Mac.
 - **A tty is reused once its terminal closes.** `TTYMap` trusts a tty → terminal sighting only if it
   was made after the session's Claude process started; a full listing replaces the map.
 - **Test restore against a copy of Ghostty, never the real one** (it runs the user's sessions): a

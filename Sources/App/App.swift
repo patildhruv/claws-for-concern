@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.openSettings(tab: note.object as? String)
         }
         SearchHelper.listen(tracker: tracker)
+        SearchHelper.clearQuarantine()
         Notifier.shared.onOpen = { [weak self] sid in self?.tracker.open(sid) }
         // Every defaults change (Settings window, menus, drags) becomes one coalesced .settingsChanged.
         NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -314,6 +315,12 @@ enum CLI {
             return Snapshot.run(outDir: rest.first ?? "screenshots")
         case "--version":
             print(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"); return 0
+        case "--clear-quarantine":
+            // What launch does, on this copy's own helper.
+            let r = Quarantine.clear(SearchHelper.url)
+            print("removed the quarantine mark from \(r.removed) item(s) in \(SearchHelper.url.path)")
+            r.failed.forEach { print("could not: \($0)") }
+            return r.failed.isEmpty ? 0 : 1
         default:
             print("""
             Claws for Concern — tiny Clawds for Claude Code sessions that need you.
@@ -337,6 +344,7 @@ enum CLI {
                                 --no-ghostty-scripting: send Ghostty no Apple Events at all)
               --displays        list displays and each one's saved spot
               --open-settings [TAB]  open the running app's Settings (general, clawds, appearance, …)
+              --clear-quarantine     take the downloaded-file mark off the bundled search helper, as launch does
               --selftest        run the built-in checks (prints ALL PASS)
               --snapshot DIR    render the README images into DIR
             """)

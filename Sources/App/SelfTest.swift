@@ -625,6 +625,38 @@ enum SelfTest {
         gate.end(id, opened: false, now: now + 16)
         check("search: a failed attempt may be tried again at once", gate.begin(id, now: now + 17) == nil)
 
+        // Gatekeeper: the command offered when the helper will not open, and taking the mark off.
+        check("search: the unblock command, quoted for the shell",
+              SearchHelper.unquarantineCommand(appPath: "/Applications/Claws for Concern.app")
+                == #"xattr -dr com.apple.quarantine "/Applications/Claws for Concern.app""#
+              && SearchHelper.unquarantineCommand(appPath: #"/Users/a "b" $HOME/x`y`\z.app"#)
+                == #"xattr -dr com.apple.quarantine "/Users/a \"b\" \$HOME/x\`y\`\\z.app""#)
+        let why = SearchHelper.failureText(NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "Blocked."]))
+        check("search: the alert gives the reason, then the way out", why.hasPrefix("Blocked.") && why.contains("Terminal"))
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("claws-quarantine-\(getpid())")
+        defer { try? fm.removeItem(at: base) }
+        let helperDir = base.appendingPathComponent("Claws Search.app/Contents/MacOS")
+        let outside = base.appendingPathComponent("outside")
+        try? fm.createDirectory(at: helperDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        fm.createFile(atPath: helperDir.appendingPathComponent("ClawsSearch").path, contents: Data("x".utf8))
+        fm.createFile(atPath: outside.appendingPathComponent("secret").path, contents: Data("x".utf8))
+        let app = base.appendingPathComponent("Claws Search.app")
+        try? fm.createSymbolicLink(at: app.appendingPathComponent("Contents/dirlink"), withDestinationURL: outside)
+        try? fm.createSymbolicLink(at: app.appendingPathComponent("Contents/filelink"), withDestinationURL: outside.appendingPathComponent("secret"))
+        let mark = Array("0081;65000000;Safari;".utf8)
+        let marked = [app.path, app.appendingPathComponent("Contents").path, helperDir.path,
+                      helperDir.appendingPathComponent("ClawsSearch").path, outside.path, outside.appendingPathComponent("secret").path]
+        let set = marked.filter { p in setxattr(p, Quarantine.name, mark, mark.count, 0, XATTR_NOFOLLOW) == 0 }.count
+        let before = Quarantine.present(app)
+        let cleared = Quarantine.clear(app)
+        check("quarantine: taken off everything inside the helper", set == marked.count && before && cleared.removed == 4
+              && cleared.failed.isEmpty && !Quarantine.present(app), "set \(set), removed \(cleared.removed), failed \(cleared.failed)")
+        check("quarantine: links are not followed out of it",
+              [outside.path, outside.appendingPathComponent("secret").path].allSatisfy {
+                  getxattr($0, Quarantine.name, nil, 0, 0, XATTR_NOFOLLOW) >= 0 })
+
         final class Plain: TerminalAdapter {
             let id = "plain", name = "Plain"
             func claims(_ s: SessionState) -> Bool { false }

@@ -19,7 +19,7 @@
 | `Sources/App/Overlay.swift` | `Placement`/`Placements` (per-display spot), `StripGeometry` (pure layout and snapping), `OverlayController` (the strip: follow-the-pointer, drag, animated relayout, overflow, hover/click/menus), `StripPanel`, `StripItem`, `ClawdCell` (sprite, badge, VoiceOver), `OverflowChip`, `BlockItem` |
 | `Sources/App/Bubble.swift` | The thought bubble panel and view: text measuring, tail, drawing (fill and stroke from `Brand`) |
 | `Sources/App/StatusMenu.swift` | Menu bar crab: count, the sessions, Jump, Dismiss All, Search Sessions, Pause, Preview, Settings, Quit |
-| `Sources/App/SearchHelper.swift` | Opens the search helper with a nonce; answers its resume requests (who may ask, stale requests, switch to a running session, else a new Ghostty tab in the folder its transcript names) and replies; `ResumeGate` (one tab per session, 15 s cooldown) |
+| `Sources/App/SearchHelper.swift` | Opens the search helper with a nonce; answers its resume requests (who may ask, stale requests, switch to a running session, else a new Ghostty tab in the folder its transcript names) and replies; `ResumeGate` (one tab per session, 15 s cooldown); `Quarantine` (the helper's download mark, cleared at launch) and the alert when the helper will not open |
 | `Sources/App/SettingsWindow.swift` | The Settings window (toolbar tabs of SwiftUI panes), live status, sprite and bubble previews, corner picker, shortcut recorder |
 | `Sources/App/Notifier.swift` | Optional macOS notifications: post, withdraw on seen, click to open |
 | `Sources/App/Settings.swift` | Every preference key with its default, read accessors, reset |
