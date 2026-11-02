@@ -19,7 +19,7 @@
 | `Sources/App/Overlay.swift` | `Placement`/`Placements` (per-display spot), `StripGeometry` (pure layout and snapping), `OverlayController` (the strip: follow-the-pointer, drag, animated relayout, overflow, hover/click/menus), `StripPanel`, `StripItem`, `ClawdCell` (sprite, badge, VoiceOver), `OverflowChip`, `BlockItem` |
 | `Sources/App/Bubble.swift` | The thought bubble panel and view: text measuring, tail, light/dark drawing |
 | `Sources/App/StatusMenu.swift` | Menu bar crab: count, the sessions, Jump, Dismiss All, Search Sessions, Pause, Preview, Settings, Quit |
-| `Sources/App/SearchHelper.swift` | Opens the search helper; answers its resume requests (switch to a running session, else a new Ghostty tab in a folder the session is filed under) and replies |
+| `Sources/App/SearchHelper.swift` | Opens the search helper with a nonce; answers its resume requests (who may ask, stale requests, switch to a running session, else a new Ghostty tab in the folder its transcript names) and replies; `ResumeGate` (one tab per session, 15 s cooldown) |
 | `Sources/App/SettingsWindow.swift` | The Settings window (toolbar tabs of SwiftUI panes), live status, sprite and bubble previews, corner picker, shortcut recorder |
 | `Sources/App/Notifier.swift` | Optional macOS notifications: post, withdraw on seen, click to open |
 | `Sources/App/Settings.swift` | Every preference key with its default, read accessors, reset |
@@ -30,14 +30,15 @@
 | `Sources/App/HotKey.swift` | Carbon global hot key, modifier conversion, key names for the recorder |
 | `Sources/App/SelfTest.swift` | `--selftest` (runs the search helper's self-test too) |
 | `Sources/App/Snapshot.swift` | `--snapshot`: renders the README images offscreen |
-| `Sources/Search/ResumeRequest.swift` | Compiled into the app and the helper: `ResumeRequest`/`ResumeReply` (the distributed notifications, validation), `ResumeCommand` (the app's template), `ProjectDirs` (Claude Code's folder encoding, "filed under"), their shared tests |
+| `Sources/Search/ResumeRequest.swift` | Compiled into the app and the helper: `ResumeRequest`/`ResumeReply` (the distributed notifications, nonce, validation), `ResumeCommand` (the app's template), `ProjectDirs` (Claude Code's folder names with its hash, the folder read back from a transcript), their shared tests |
+| `Sources/Search/ResumeClient.swift` | The helper's side of a resume: `PendingResumes` (replies and timeouts, pure), `ResumeClient` (sends with the launch nonce, clipboard fallback, `settle` before quitting) |
 | `Sources/Search/App.swift` | The helper's `@main`: the window and Session menu, quit on close; CLI `--search`, `--resume`; `--snapshot` (offscreen) |
-| `Sources/Search/Model.swift` | `Scope`, `Message`, `Session` (name, folder, resume command, `canResume`), `ProjectDirs.resolve` (disk decode), `Paths` (privacy-protected folders), `Shell.quote` |
+| `Sources/Search/Model.swift` | `Scope`, `Message`, `Session` (name, folder, resume command, `canResume`/`whyNotResumable`), `ProjectDirs.resolve` (disk decode), `Paths` (privacy-protected folders, symlinks read with lstat), `Shell.quote` |
 | `Sources/Search/Loader.swift` | `SessionStore`: finds transcripts, re-parses only changed files, in parallel; lenient `Record`/`Content`/`Block` decoding, `FlatStrings` for tool inputs, `SessionBuilder` (name and folder rules), `Prompts` (first-prompt naming) |
 | `Sources/Search/Tokenizer.swift` | UTF-8 word tokenizer for the index and highlighting |
 | `Sources/Search/SearchIndex.swift` | `ParsedQuery`, `PhraseMatcher`, the inverted index, fuzzy word matching (bounded edit distance), ranking |
 | `Sources/Search/Snippets.swift` | Row previews and the detail pane's matching messages, highlighted; ANSI output for the CLI |
-| `Sources/Search/AppModel.swift` | The window's state: refresh, debounced background search, previews, selection; resume through Claws (request, reply, clipboard fallback), copy actions |
+| `Sources/Search/AppModel.swift` | The window's state: refresh, debounced background search, previews, selection; Return waits for fresh results; resume (through `ResumeClient`) and copy actions |
 | `Sources/Search/Views.swift` | Split view, results list, detail pane, `NSSearchField` wrapper (arrows move the selection, Return resumes, Esc clears) |
 | `Sources/Search/SelfTest.swift` | The helper's `--selftest`: unit checks plus searches picked from the real transcripts |
 | `Sources/Search/Info.plist` | The helper's bundle (build.sh adds the app's version) |

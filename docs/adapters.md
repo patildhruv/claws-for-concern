@@ -121,16 +121,19 @@ Optional members, with defaults:
 
 #### `newPane(in:typing:)`
 
-Search's Resume calls it through `Terminals.newPane`, which first launches your app if it is not
-running (without bringing it forward) and gets its Automation permission, both on the prompt thread.
-Your method then runs on the worker: open a **new** tab, pane or window in `dir`, type `command` into
-its shell followed by Return (typed, not run as the pane's command, so the user's aliases work and the
-shell stays open), bring it forward, and return whether that worked. Never type into an existing pane.
-`dir` is an absolute path and `command` is the user's own resume command with a validated session ID,
-but quote both for your script or CLI all the same. Ghostty's version, for reference:
+Search's Resume calls it through `Terminals.newPane`. When your app runs and may already be scripted,
+that goes straight to the worker; otherwise it first launches your app (without bringing it forward)
+and gets its Automation permission on the prompt thread. Either way it is dropped once the request is
+30 s old. Your method runs on the worker: open a **new** tab, pane or window in `dir`, type `command`
+into its shell followed by Return (typed, not run as the pane's command, so the user's aliases work and
+the shell stays open), bring it forward, and return whether that worked. Never type into an existing
+pane. `dir` is an absolute path Claws read from the session's transcript and `command` is the user's
+own resume command with a validated session ID, but quote both for your script or CLI all the same.
+Address the app your adapter was made for (its bundle ID), not a hard-coded one, so tests can drive a
+copy. Ghostty's version, for reference:
 
 ```applescript
-tell application id "com.mitchellh.ghostty"
+tell application id "<the adapter's Ghostty>"
   set cfg to {initial working directory:"<dir>", initial input:"<command>" & linefeed}
   if (count of windows) > 0 then
     new tab in front window with configuration cfg

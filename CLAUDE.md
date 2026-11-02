@@ -189,15 +189,20 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
 - Resume never scripts a terminal from the helper: it posts `…claws-for-concern.resumeSession`;
   `SearchHelper` switches to a running session through `Tracker.open`, else opens a Ghostty tab in the
   session's folder with `Terminals.newPane` and types `Settings.resumeCommand`, then answers with
-  `…resumeSessionReply`. No answer within 2 s, or a failure: the helper copies the command instead.
-- `Sources/Search/ResumeRequest.swift` is compiled into both binaries: the payload, its validation and
-  its tests. **Any process can post that notification**: Claws accepts only a UUID and an absolute
-  folder that Claude Code filed the session under (`~/.claude/projects/<encoded folder>/<id>.jsonl`).
-- **The helper must never stat or list inside ~/Documents, ~/Desktop, ~/Downloads, iCloud or
-  /Volumes** (privacy prompt). Reading `~/.claude` is fine.
+  `…resumeSessionReply`. No answer within 2 s, no outcome within 30 s, or a failure: the helper
+  copies the command instead (also when its window closes with a request still waiting, up to 3 s).
+- `Sources/Search/ResumeRequest.swift` is compiled into both binaries: the payload, its validation,
+  Claude Code's folder names (hash included) and its tests. **Any process can post that
+  notification**, so Claws needs the nonce it gave the Search window it launched (`--nonce`), that
+  window in front, a request under 30 s old, a UUID, and exactly the folder it reads back from the
+  session's own transcript; at most one new tab per session per 15 s. What that does not stop (a
+  process running as you can still `open` the helper or rewrite `resumeCommand`): docs/search.md.
+- **The helper must never stat or list inside ~/Documents, ~/Desktop, ~/Downloads, iCloud, cloud
+  storage, other apps' containers or /Volumes**, through a symlink either (privacy prompt):
+  `Paths.isPrivacyProtected` reads links with `lstat`, never following them. Reading `~/.claude` is fine.
 - Commands (`H=".../Contents/Helpers/Claws Search.app/Contents/MacOS/ClawsSearch"`): `$H --selftest`,
-  `$H --search "words" [--limit N] [--recent] [--scope …]`, `$H --resume <id prefix>` (asks the running
-  Claws, for real), `$H --snapshot out.png [--query q]` (offscreen, takes no focus).
+  `$H --search "words" [--limit N] [--recent] [--scope …]`, `$H --resume <id prefix>` (a request from
+  the terminal, which Claws must refuse), `$H --snapshot out.png [--query q]` (offscreen, takes no focus).
 
 ## Settings, placement, the Dock
 

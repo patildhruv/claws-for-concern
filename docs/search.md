@@ -19,41 +19,79 @@ running session is:
 
 ```
 Claws Search ── ResumeRequest ──▶ Claws for Concern (SearchHelper)
-  (Resume)      sessionId, folder,     │
-                token                  ├─ session still running?  ──▶ Tracker.open: its tab, as a Clawd click
-                                       ├─ filed under that folder? ──▶ Terminals.newPane (Ghostty): a new tab
-                                       │                               in the folder, typing the resume command
+  (Resume)      sessionId, folder,     ├─ our nonce, Search in front, < 30 s old?  else refused
+                nonce, token, sent     ├─ session still running?   ──▶ Tracker.open: its tab, as a Clawd click
+                                       ├─ already opening, or opened < 15 s ago?  else refused
+                                       ├─ the folder its transcript names?  ──▶ Terminals.newPane (Ghostty):
+                                       │                                       a new tab there, typing the command
                                        └─ otherwise                ──▶ refused
              ◀── ResumeReply ──────────┘   focused | opening → opened | failed, plus one line of text
 ```
 
 - Both notification names start with `io.github.patildhruv.claws-for-concern.` (`resumeSession`,
   `resumeSessionReply`). `Sources/Search/ResumeRequest.swift` defines them, the payload, its
-  validation and its tests, and is **compiled into both binaries** so the two sides cannot drift.
+  validation, Claude Code's folder names and its tests, and is **compiled into both binaries**.
 - **The command** is Claws' Settings → General → Resume command (`resumeCommand`, `{id}` = the
-  session ID; default `claude --resume {id}`). The helper reads it from Claws' UserDefaults domain
-  for Copy Resume Command and the command it shows; Claws uses `Settings.resumeCommand` to type it.
-  The self-test checks both read the same value.
-- **Any process on the Mac can post a distributed notification**, and the session ID gets typed into
-  a shell. So Claws accepts only a UUID session ID and an absolute folder without control characters,
-  and opens a tab only when `~/.claude/projects/<encoded folder>/<id>.jsonl` exists: the folder must be
-  where Claude Code filed that session, which is also the only place `claude --resume` finds it. The
-  command template comes from Claws' own settings, never from the notification.
-- **Running sessions** (a session file whose Claude process is alive) are switched to, never resumed a
-  second time.
+  session ID; default `ResumeCommand.defaultTemplate`, `claude --resume {id}`). The helper reads it
+  from Claws' UserDefaults domain for Copy Resume Command and the command it shows; Claws types
+  `Settings.resumeCommand`. Claws' self-test hands its value to the helper's, which reads the domain
+  its own way and compares.
+- **Running** means the session's Claude process is alive. A session file with no process on record
+  counts only if Claws knows its pane or the file changed in the last 5 minutes (such a file can
+  otherwise linger 48 h and would turn Resume into "switch to a tab that is gone").
+- **The folder is read back, not believed.** Claws finds `<id>.jsonl` in `~/.claude/projects` and takes
+  the helper's own rule from it (`ProjectDirs.folder`): the last `relocated` record's folder, else the
+  first recorded `cwd`, whichever encodes to that project folder, hash included. The request's folder
+  must equal it exactly. Folders the helper found only by walking the disk are not resumable this way
+  (20 of 545 on 2026-11-02; Copy Command still works).
+- **Project folder names** for paths over 200 encoded characters end in `-` plus Claude Code's hash:
+  `(h << 5) - h + unit` over the path's UTF-16 units, 32-bit, `Math.abs(h).toString(36)`. Read from
+  the 2.1.316 bundle (two functions, `Zhe` and the encoder); the self-test checks three paths against
+  values those functions produced in node. No such folder existed on this Mac to check against.
+- **Duplicates**: one new tab per session at a time, and none for 15 s after one opened (by then the
+  resumed session usually reports itself running, and a second Resume switches to it).
+- **Stale requests**: Claws refuses one more than 30 s old (or 30 s ahead), and `Terminals.newPane`
+  checks the same deadline again after a launch or a permission prompt, right before the script. A
+  terminal Claws may already script and that runs skips the prompt thread entirely, so another app's
+  unanswered prompt cannot hold it up.
 - **A new tab** is opened only through an adapter's optional `newPane(in:typing:)` (docs/adapters.md).
   Ghostty: `new tab in front window with configuration {initial working directory:…, initial input:…
-  & linefeed}`, or `new window` when it has none. The command is typed into the login shell, so
-  aliases resolve and the tab stays open afterwards. It never types into an existing terminal.
-  `Terminals.newPane` first launches the terminal if it is not running (without bringing it forward)
-  and asks for the Automation permission if needed, both on the prompt thread; only the script runs on
-  the worker. A session that is no longer running has no terminal on record, so this is Ghostty.
-- **When it cannot**: Claws not running, no answer within 2 s (an older Claws, or a hung one), or a
-  `failed` reply: the helper puts `cd <folder> && <command>` on the clipboard and says so. It does not
-  launch Claws: the request would race Claws' startup, and a launch can raise first-run prompts.
-- Resume is greyed out for title-only stubs named `<uuid>.orphaned-<ms>-<hash>.jsonl` (two records,
-  `ai-title` and `agent-name`; 3 of 545 transcripts on 2026-11-02). They are listed, as before, but
-  are not session IDs.
+  & linefeed}`, or `new window` when it has none, in the adapter's own Ghostty (`--bundle-id` copies
+  included). The command is typed into the login shell, so aliases resolve and the tab stays open
+  afterwards. It never types into an existing terminal. A session that is no longer running has no
+  terminal on record, so this is Ghostty.
+- **When it cannot**: Claws not running, no answer within 2 s (an older Claws, or a hung one), no
+  outcome within 30 s, or a `failed` reply: the helper puts `cd <folder> && <command>` on the
+  clipboard and says so. Closing the window (or ⌘Q) with a request still waiting holds the quit up to
+  3 s (`.terminateLater`) for the answer, then copies. It does not launch Claws: the request would race
+  Claws' startup, and a launch can raise first-run prompts.
+- **Return** right after typing waits for the results of what is in the field and resumes their first
+  hit; until they arrive the selection still belongs to the old results. Typing again cancels it.
+- Resume is greyed out, with the reason as its tooltip, for title-only stubs named
+  `<uuid>.orphaned-<ms>-<hash>.jsonl` (3 of 545 on 2026-11-02; not session IDs, so no Copy Command
+  either), for folders not recorded in the transcript, and for folders that no longer exist.
+
+### Who can ask
+
+A distributed notification can come from any process, so a resume request is checked by Claws:
+
+- **A nonce.** Each helper Claws launches gets a random one as `--nonce`; Claws remembers it with that
+  helper's process and forgets it when the helper quits. Requests without one Claws issued are
+  refused. A helper already open when Claws restarts keeps an old nonce: it must be closed and opened
+  again from the menu.
+- **The Search window in front.** The frontmost app must be the helper inside this bundle (its bundle
+  path) and the process that got the nonce. So a resume is something you just clicked in Search, not
+  something that happens out of sight.
+- **Under 30 s old**, and only for **the folder the session's transcript names**, with a **UUID**
+  session ID; the command always comes from Claws' own settings.
+
+What this does not stop, honestly: a process running as you, outside any sandbox, can read the
+helper's command line (`ps`, which shows the nonce), `open` the helper itself, or rewrite
+`resumeCommand` with `defaults write` so that the next resume runs something else. Such a process can
+already run anything as you, so Search adds no new power for it; what changed is that a resume is now
+visible and started by you, not silent. A sandboxed app is expected to fail the nonce and
+front-window checks, since the App Sandbox normally keeps it from other processes' arguments and other
+apps' preferences; that was not tested here.
 
 ## How it reads Claude Code's files
 
@@ -62,7 +100,7 @@ Verified by the original Session Search against the Claude Code 2.1.289 binary (
 
 - Transcripts: `~/.claude/projects/<encoded folder>/<session id>.jsonl`; subagents in
   `<session id>/subagents/*.jsonl`. Folder encoding: `path.replace(/[^a-zA-Z0-9]/g, "-")`, cut at
-  200 characters plus a hash suffix (`ProjectDirs`).
+  200 characters plus `-` and a hash (`ProjectDirs.name`, see "Project folder names" above).
 - **Name** precedence (the `/resume` list): `agentName || customTitle || aiTitle || summary || first
   prompt`. Each metadata record type is last-wins. `/rename` writes both `custom-title` and
   `agent-name`.
@@ -87,10 +125,16 @@ Verified by the original Session Search against the Claude Code 2.1.289 binary (
 
 ## Traps
 
-- **Never stat or list inside ~/Documents, ~/Desktop, ~/Downloads, iCloud or /Volumes** for a session's
-  folder: even a stat makes macOS ask for permission on the helper's behalf. `Paths.isPrivacyProtected`
-  guards the folder-exists badge and `ProjectDirs.resolve`; Claws' folder check reads only inside
+- **Never stat or list inside ~/Documents, ~/Desktop, ~/Downloads, iCloud (Mobile Documents and
+  CloudStorage), other apps' Containers and Group Containers, or /Volumes** for a session's folder:
+  even a stat makes macOS ask for permission on the helper's behalf. `Paths.isPrivacyProtected` guards
+  the folder-exists check and `ProjectDirs.resolve`. A link along the path counts: each prefix is read
+  with `lstat` and `destinationOfSymbolicLink` (which never follow a link), and only once the text
+  says the whole path is outside every protected folder. Claws' folder check reads only inside
   `~/.claude/projects`. Reading `~/.claude` is fine.
+- **`standardizingPath` looks on disk**: it turns an existing `/private/tmp/…` into `/tmp/…`, so the
+  request's folder is checked for `.`, `..`, `//` and a trailing `/` by its components instead (two
+  real projects here live under `/private`).
 - **Tool output is not indexed** (most of the bytes). Only prompts, replies, tool-call inputs and
   subagent transcripts. `SessionStore.wanted` skips lines without a user/assistant/title type before
   JSON decoding; `Block` never materialises `tool_result` text.
@@ -107,7 +151,7 @@ Verified by the original Session Search against the Claude Code 2.1.289 binary (
 | Run | Wall time | Peak RSS | Peak footprint |
 | --- | --- | --- | --- |
 | `--search` (read, index, one query) | 3.3 s | 437 MB | 195 MB |
-| `--selftest` | 4.5 s | 402 MB | 198 MB |
+| `--selftest` (132 checks) | 5.0 s | 387 MB | 205 MB |
 | Window (`--snapshot`: the real model and views, offscreen) | 7.3 s | 417 MB | 291 MB |
 
 With the index built and the window drawn: about 195 MB footprint, 197 MB RSS (sampled 2 s after
@@ -119,9 +163,11 @@ indexing finished). Reading takes about 3 s, building the index about 0.5 s, a q
 H="build/Claws for Concern.app/Contents/Helpers/Claws Search.app/Contents/MacOS/ClawsSearch"
 $H --selftest                # unit checks + searches picked from your own transcripts (ALL PASS)
 $H --search "words" [--limit N] [--recent] [--scope prompts,replies,tools,subagents]
-$H --resume <id prefix>      # the Resume button's request to the running Claws; prints its answers
+$H --resume <id prefix>      # a resume request from the terminal: Claws must refuse it (see below)
 $H --snapshot out.png [--query q]
 ```
 
 `ClawsForConcern --selftest` runs the helper's self-test as a subprocess and reports it. `--resume`
-acts for real when the running Claws has the handler: it switches tabs or opens a Ghostty tab.
+sends the Resume button's request with a nonce Claws never issued, from a terminal rather than the
+Search window, and prints the answers: a correct Claws replies `failed` ("not opened by this Claws
+for Concern"); an older one (no handler) does not answer. Real resumes need the window Claws opened.
