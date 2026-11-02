@@ -67,7 +67,7 @@ final class ResumeClient {
     /// Claws switches to the session's tab if it is still running, else opens a terminal tab in its
     /// folder and types the resume command. When it cannot, the command goes on the clipboard.
     func resume(_ s: Session) {
-        guard s.canResume, let cwd = s.cwd, let command = s.resumeCommand() else { return }
+        guard !Demo.active, s.canResume, let cwd = s.cwd, let command = s.resumeCommand() else { return }
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: ResumeRequest.appID).isEmpty else {
             copy(command, "Claws for Concern is not running. Command copied: \(command)")
             return

@@ -71,9 +71,9 @@ final class BubbleView: NSView {
     var anchorX: CGFloat = 20 { didSet { needsDisplay = true } }
     private var below = false
 
-    private static let fill = NSColor(name: nil) { $0.isDark ? NSColor(srgbRed: 0.17, green: 0.165, blue: 0.155, alpha: 0.98)
-                                                             : NSColor(srgbRed: 1, green: 1, blue: 0.995, alpha: 0.98) }
-    private static let stroke = NSColor(name: nil) { $0.isDark ? NSColor(white: 1, alpha: 0.12) : NSColor(white: 0, alpha: 0.09) }
+    // Shared with Search's empty states (Brand.swift).
+    private static let fill = Brand.bubbleFill
+    private static let stroke = Brand.bubbleStroke
 
     override init(frame: NSRect) {
         super.init(frame: frame)

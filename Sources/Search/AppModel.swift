@@ -10,15 +10,16 @@ final class AppModel: ObservableObject {
             runSearch(after: 0.12)
         }
     }
+    // Your choices are remembered, except in the demo, which always starts from the defaults.
     @Published var scope: Scope {
         didSet {
-            UserDefaults.standard.set(Int(scope.rawValue), forKey: "scope")
+            if !Demo.active { UserDefaults.standard.set(Int(scope.rawValue), forKey: "scope") }
             if scope != oldValue { runSearch(after: 0) }
         }
     }
     @Published var sort: SortMode {
         didSet {
-            UserDefaults.standard.set(sort.rawValue, forKey: "sort")
+            if !Demo.active { UserDefaults.standard.set(sort.rawValue, forKey: "sort") }
             if sort != oldValue { runSearch(after: 0) }
         }
     }
@@ -52,10 +53,12 @@ final class AppModel: ObservableObject {
 
     init(store: SessionStore = SessionStore()) {
         self.store = store
-        let saved = UserDefaults.standard.object(forKey: "scope") as? Int
+        let saved = Demo.active ? nil : UserDefaults.standard.object(forKey: "scope") as? Int
         scope = saved.map { Scope(rawValue: UInt8(truncatingIfNeeded: $0)) } ?? .standard
-        sort = SortMode(rawValue: UserDefaults.standard.string(forKey: "sort") ?? "") ?? .relevance
+        sort = Demo.active ? .relevance : SortMode(rawValue: UserDefaults.standard.string(forKey: "sort") ?? "") ?? .relevance
         ResumeClient.shared.show = { [weak self] in self?.show(flash: $0) }
+        // Made-up sessions: nothing to resume, and nothing is ever sent to Claws for Concern.
+        if Demo.active { resumer = { [weak self] _ in self?.show(flash: "Demo sessions: there is nothing to resume.") } }
         refresh()
     }
 
@@ -67,7 +70,7 @@ final class AppModel: ObservableObject {
     }
 
     var statusLine: String {
-        if sessionCount == 0 { return indexing ? "Reading transcripts…" : "No transcripts found in ~/.claude/projects" }
+        if sessionCount == 0 { return indexing ? "Reading your sessions…" : "No sessions in ~/.claude/projects yet" }
         let base = query.trimmingCharacters(in: .whitespaces).isEmpty
             ? "\(sessionCount) sessions"
             : "\(hits.count) of \(sessionCount) sessions"

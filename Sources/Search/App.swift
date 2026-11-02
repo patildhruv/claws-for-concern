@@ -5,10 +5,13 @@ import SwiftUI
 enum Main {
     static func main() {
         let args = CommandLine.arguments
-        if args.contains("--selftest") { exit(SelfTest.run()) }
-        if args.contains("--search") { exit(CLI.search(args)) }
-        if args.contains("--resume") { exit(CLI.resume(args)) }
-        if args.contains("--snapshot") { exit(MainActor.assumeIsolated { Snapshot.run(args) }) }
+        if args.contains("--selftest") { exit(SelfTest.run()) }     // turns the demo on and off itself
+        // Made-up sessions instead of yours, for --search, --snapshot and the window.
+        if args.contains("--demo") { Demo.activate() }
+        func done(_ code: Int32) -> Never { Demo.deactivate(); exit(code) }
+        if args.contains("--search") { done(CLI.search(args)) }
+        if args.contains("--resume") { done(CLI.resume(args)) }
+        if args.contains("--snapshot") { done(MainActor.assumeIsolated { Snapshot.run(args) }) }
         ClawsSearchApp.main()
     }
 }
@@ -20,7 +23,8 @@ struct ClawsSearchApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        Window("Claws Search", id: "main") {
+        // The app is "Claws Search" (Dock, menus, ⌘-Tab); its window says what it does, like the crab menu.
+        Window("Search Sessions", id: "main") {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 820, minHeight: 480)
@@ -42,6 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    func applicationWillTerminate(_ notification: Notification) { Demo.deactivate() }
+
     /// ⌘W or ⌘Q right after Resume: wait up to 3 s for Claws' answer, else copy the command, then quit.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
@@ -56,8 +62,11 @@ struct SessionCommands: Commands {
     @ObservedObject var model: AppModel
 
     var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About Claws Search") { AboutBox.show() }
+        }
         CommandGroup(after: .textEditing) {
-            Button("Search Conversations") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
+            Button("Find…") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
                 .keyboardShortcut("f")
         }
         CommandMenu("Session") {
@@ -78,6 +87,26 @@ struct SessionCommands: Commands {
             Button("Refresh Index") { model.refresh() }
                 .keyboardShortcut("r")
         }
+    }
+}
+
+/// "Claws Search, part of Claws for Concern <version>", with the project's page.
+enum AboutBox {
+    static let repo = URL(string: "https://github.com/patildhruv/claws-for-concern")!
+
+    static func show() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
+        let text: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                                                   .foregroundColor: NSColor.labelColor, .paragraphStyle: centred]
+        let credits = NSMutableAttributedString(string: "Part of Claws for Concern \(version)\n", attributes: text)
+        credits.append(NSAttributedString(string: "github.com/patildhruv/claws-for-concern",
+                                          attributes: text.merging([.link: repo]) { $1 }))
+        // The version is in the credits line; empty strings keep the panel's own "Version" line out.
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Claws Search", .applicationVersion: "", .version: "",
+                                                     .credits: credits])
+        NSApp.activate()
     }
 }
 
@@ -138,6 +167,7 @@ enum CLI {
         guard let prefix = value(args, "--resume"), !prefix.isEmpty else {
             print("usage: ClawsSearch --resume <session id or prefix>"); return 2
         }
+        guard !Demo.active else { print("demo sessions: nothing to resume, and nothing is sent"); return 1 }
         let matches = SessionStore().load().sessions.filter { $0.id.hasPrefix(prefix) }
         guard matches.count == 1, let s = matches.first else {
             print(matches.isEmpty ? "no session \(prefix)" : "\(matches.count) sessions start with \(prefix)"); return 1
@@ -170,34 +200,46 @@ enum CLI {
     }
 }
 
-/// `--snapshot <png> [--query <q>]`: indexes, renders the window offscreen and quits. For checking the
-/// UI from a script: it never shows a window or takes focus, and needs no screen recording permission.
+/// `--snapshot <png> [--query <q>] [--appearance light|dark]`: indexes, searches, selects the first hit,
+/// renders the window offscreen and quits. With `--demo`, only made-up sessions (the README's pictures).
+/// It never shows a window or takes focus, and needs no screen recording permission.
 enum Snapshot {
     @MainActor
     static func run(_ args: [String]) -> Int32 {
-        guard let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count else {
-            print("usage: ClawsSearch --snapshot <out.png> [--query <q>]"); return 2
+        func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+        guard let path = value("--snapshot") else {
+            print("usage: ClawsSearch [--demo] --snapshot <out.png> [--query <q>] [--appearance light|dark]"); return 2
         }
-        let path = args[i + 1]
-        let query = args.firstIndex(of: "--query").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? ""
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
         func wait(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
         let model = AppModel()
         while model.indexing { wait(0.2) }
-        model.query = query
-        wait(2)     // the search, then the row previews and the detail pane
+        model.query = value("--query") ?? ""
+        wait(0.5)
+        if let first = model.hits.first?.id { model.selection = first }
+        wait(1.5)   // the row previews and the detail pane
 
-        let size = NSSize(width: 1180, height: 760)
-        let host = NSHostingView(rootView: ContentView().environmentObject(model).frame(width: size.width, height: size.height))
+        // A little under the window's default size, so a 2x PNG for the README stays under ~400 KB.
+        let size = NSSize(width: 1100, height: 700)
+        // As in use: the key window's controls (the Resume button in clay, not inactive grey).
+        let host = NSHostingView(rootView: ContentView().environmentObject(model).environment(\.controlActiveState, .key)
+            .frame(width: size.width, height: size.height))
         host.sceneBridgingOptions = [.toolbars, .title]
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                              backing: .buffered, defer: false)
+        let window = KeyLookingWindow(contentRect: NSRect(origin: .zero, size: size),
+                                      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                      backing: .buffered, defer: false)
+        if let a = value("--appearance") { window.appearance = NSAppearance(named: a == "dark" ? .darkAqua : .aqua) }
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         wait(1)
+        guard let frame = window.contentView?.superview else { return 1 }
+        // As if you had just typed it: the cursor after the text, not the whole query selected.
+        if let editor = window.firstResponder as? NSTextView { editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0)) }
+        frame.layoutSubtreeIfNeeded()
+        wait(0.5)
+        flatten(frame.layer)
         guard let view = window.contentView?.superview ?? window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return 1 }
         view.cacheDisplay(in: view.bounds, to: rep)
@@ -205,5 +247,24 @@ enum Snapshot {
               (try? png.write(to: URL(fileURLWithPath: path))) != nil else { return 1 }
         print("wrote \(path)")
         return 0
+    }
+
+    /// Drawn the way the window looks while you use it: as the key window, so the search field shows its
+    /// cursor. (The traffic lights still draw grey: they ask the app, which is never active here.)
+    final class KeyLookingWindow: NSWindow {
+        override var isKeyWindow: Bool { true }
+        override var isMainWindow: Bool { true }
+    }
+
+    /// `cacheDisplay` draws layers without the compositing filters the window server applies on
+    /// screen. One shows: the cut-out under the Sort control's selected segment (a destOut layer) drew
+    /// as a black block. Skipped, which leaves the segment's own pill. (The rest of the window has no
+    /// vibrancy to lose: the list is a plain pane, not a translucent sidebar.)
+    private static func flatten(_ layer: CALayer?) {
+        func walk(_ l: CALayer) {
+            if l.compositingFilter.map({ String(describing: $0) }) == "destOut" { l.isHidden = true }
+            l.sublayers?.forEach(walk)
+        }
+        layer.map(walk)
     }
 }

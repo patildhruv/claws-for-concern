@@ -16,5 +16,8 @@ ffmpeg -v error -y -framerate 20 -i "$TMP/frames/strip-%03d.png" \
   -vf "split[a][b];[a]palettegen=max_colors=128:stats_mode=full[p];[b][p]paletteuse=dither=none" \
   -loop 0 $OUT/demo.gif
 sips -Z 256 Resources/AppIcon-1024.png --out $OUT/icon.png >/dev/null
+# Search, on made-up sessions only: --demo never reads your ~/.claude (its self-test checks the paths).
+SEARCH="build/Claws for Concern.app/Contents/Helpers/Claws Search.app/Contents/MacOS/ClawsSearch"
+for v in light dark; do "$SEARCH" --demo --snapshot "$OUT/search-$v.png" --query '"rate limit"' --appearance $v >/dev/null; done
 rm -rf "$TMP"
 ls -la $OUT

@@ -139,7 +139,7 @@ enum Snippets {
             guard !plain.isEmpty else { return }
             var a = AttributedString(plain)
             if marked {
-                a.backgroundColor = Color.yellow.opacity(0.35)
+                a.backgroundColor = Color(nsColor: Brand.highlight)     // a clay tint, with the text colour on it
                 a.foregroundColor = Color.primary
                 a.inlinePresentationIntent = .stronglyEmphasized
             }
