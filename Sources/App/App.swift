@@ -333,7 +333,8 @@ enum CLI {
                                 (needs its own CLAWS_HOME; the restore commands take --bundle-id ID, a
                                 copy of Ghostty to drive; --restore-on: as if Restore were on, this
                                 process only; --assume-active S: count as typing for S seconds;
-                                --fail-typing: typing errors after its keys, never retried)
+                                --fail-typing: typing errors after its keys, never retried;
+                                --no-ghostty-scripting: send Ghostty no Apple Events at all)
               --displays        list displays and each one's saved spot
               --open-settings [TAB]  open the running app's Settings (general, clawds, appearance, …)
               --selftest        run the built-in checks (prints ALL PASS)

@@ -29,7 +29,7 @@ $B --watch [--yes] [--seconds N] [--command T]   # tracker + restore without the
                             # (--bundle-id ID drives a Ghostty copy; --restore-on: as if Restore were on,
                             #  this process only; --assume-active S: you count as typing for S seconds;
                             #  --fail-typing: every typing script errors after its keys, to test it is
-                            #  never retried)
+                            #  never retried; --no-ghostty-scripting: no Apple Events to Ghostty at all)
 $B --displays               # each display's UUID and saved spot
 $B --open-settings [TAB]    # opens the running app's Settings on a tab (distributed notification)
 $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps it (needs ffmpeg)
@@ -101,6 +101,14 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   (parent `login`, which runs as root under Ghostty); a script waiting on `read` (a zsh whose parent is
   the login shell); for `sleep 300 | cat`, `sleep`, not `cat`.
 - Ghostty's restored windows reopen with the tab that was selected at quit selected again.
+- **Cmd-Q of Ghostty 1.4 with claude running** (8 sessions, 3 MCP servers each, 3 windows): every tab
+  counts as a window, so it asks "You have 8 windows with running processes…" (Review Windows… is the
+  default, then Terminate Processes, Cancel); Review asks "Quit Ghostty?" on each tab in turn. Nothing
+  under Ghostty dies before the Ghostty process exits; all of it is gone 0.62–0.73 s after. No run left
+  it windowless. With Clawds up and Ghostty in front, Claws keeps asking for the focused tab (one
+  query, 6 Apple Events) every second through the whole quit: exit times matched runs without Claws
+  and with `--no-ghostty-scripting` (9.7–9.9 s, set by the confirmations; 0.24 s with no
+  confirmation). Measured with real key events posted to the copy's pid, no Apple Events.
 - `CGEventSource.secondsSinceLastEventType(.combinedSessionState, .keyDown)` tracks real keystrokes
   without the Input Monitoring permission (8.1 s for keystrokes against 2.8 s for any input, no
   prompt). Zero-distance pointer events posted to the HID tap reset only "any input": a focused tab

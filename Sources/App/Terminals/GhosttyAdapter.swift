@@ -59,8 +59,13 @@ final class GhosttyAdapter: TerminalAdapter {
     /// Ghostty, running and done launching. Never script it otherwise: telling an app that is not
     /// running anything launches it.
     private var ready: NSRunningApplication? {
-        NSRunningApplication.runningApplications(withBundleIdentifier: app).first { !$0.isTerminated && $0.isFinishedLaunching }
+        guard !GhosttyAdapter.scriptingOff else { return nil }
+        return NSRunningApplication.runningApplications(withBundleIdentifier: app).first { !$0.isTerminated && $0.isFinishedLaunching }
     }
+
+    /// Tests only (the CLI's `--no-ghostty-scripting`): send Ghostty no Apple Events at all, to compare
+    /// its behaviour with and without them. The app never sets it.
+    static var scriptingOff = false
 
     /// Whether this Ghostty process reports `tty` and `pid`: from its version (1.4+); nil while
     /// unknown, which a listing then settles. Never decided by a timeout.

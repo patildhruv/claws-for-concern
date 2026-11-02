@@ -725,6 +725,8 @@ enum RestoreCLI {
         Restorer.shared.forceOn = args.contains("--restore-on")
         // Tests: every typing ends in an error after its keys (is it ever retried?).
         GhosttyAdapter.failAfterTyping = args.contains("--fail-typing")
+        // Tests: no Apple Events to Ghostty at all (does Claws change how Ghostty quits?).
+        GhosttyAdapter.scriptingOff = args.contains("--no-ghostty-scripting")
     }
 
     /// `--watch` writes the ledger and app state as the app does: only into a data folder of its own.
