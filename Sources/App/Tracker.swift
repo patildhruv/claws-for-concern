@@ -36,8 +36,12 @@ final class Tracker {
         /// the hook's files are never written by the app.
         var hostPid: Int32?
         var hostStart: Double?
-        /// The Claude process the app last looked for a host for: once per process.
+        /// The Claude process the app last looked for a host for: once per process, and the host
+        /// counts only for that process (a resume runs in a new one).
         var hostLookedUp: Int32?
+        /// The Claude process `terminalId` was confirmed for, when `exact`: a resumed session may run
+        /// in another tab.
+        var paneFor: Int32?
     }
     private struct Saved: Codable {
         var meta: [String: Meta] = [:]
@@ -341,8 +345,10 @@ final class Tracker {
     private func notePanes() {
         for (sid, s) in states {
             let a = terminals.adapter(for: s)
-            guard a.learnsPanes, let p = a.paneID(for: s), saved.meta[sid]?.terminalId != p || saved.meta[sid]?.exact != true else { continue }
-            assign(p, to: sid, exact: true)
+            let m = saved.meta[sid]
+            guard a.learnsPanes, let p = a.paneID(for: s),
+                  m?.terminalId != p || m?.exact != true || m?.paneFor != s.claudePid else { continue }
+            assign(p, to: sid, exact: true, claudePid: s.claudePid)
         }
     }
 
@@ -350,7 +356,7 @@ final class Tracker {
     /// the session ran, never a learned guess. The stored one comes first: once the session is dead,
     /// a live lookup can only be worse.
     private func exactPane(_ s: SessionState) -> String? {
-        if let m = saved.meta[s.sessionId], m.exact == true, let p = m.terminalId { return p }
+        if let m = saved.meta[s.sessionId], m.exact == true, Backfill.forProcess(m.paneFor, s.claudePid), let p = m.terminalId { return p }
         return terminals.adapter(for: s).paneID(for: s)
     }
 
@@ -364,23 +370,26 @@ final class Tracker {
     private func mapNewSessions() {
         guard Date().timeIntervalSince(lastNewSessionMap) > 3 else { return }
         let new = states.values.filter { s in
-            let (a, pane) = location(s)
-            return pane == nil && a.learnsPanes && a.restoresPanes && (s.claudeStart ?? 0) > (listedAt[a.id] ?? 0)
+            let a = terminals.adapter(for: s)
+            return Backfill.needsListing(exact: exactPane(s), learns: a.learnsPanes, restores: a.restoresPanes,
+                                         claudeStart: s.claudeStart, listedAt: listedAt[a.id])
         }
         guard !new.isEmpty else { return }
         lastNewSessionMap = Date()
         listPanes(new, learn: false)
     }
 
-    private func assign(_ terminalId: String, to sid: String, exact: Bool = false) {
+    private func assign(_ terminalId: String, to sid: String, exact: Bool = false, claudePid: Int32? = nil) {
         for (other, var m) in saved.meta where other != sid && m.terminalId == terminalId {
             m.terminalId = nil
             m.exact = nil
+            m.paneFor = nil
             saved.meta[other] = m
         }
         var m = saved.meta[sid] ?? Meta()
         m.terminalId = terminalId
         m.exact = exact
+        m.paneFor = exact ? claudePid : nil
         saved.meta[sid] = m
     }
 
@@ -557,8 +566,10 @@ final class Tracker {
     private func backfillHosts(_ live: [String: SessionState]) {
         for (sid, s) in live where s.hostPid == nil {
             var m = saved.meta[sid] ?? Meta()
-            guard m.hostPid == nil, let pid = s.claudePid, m.hostLookedUp != pid else { continue }
+            guard let pid = s.claudePid, m.hostLookedUp != pid else { continue }
             m.hostLookedUp = pid
+            m.hostPid = nil
+            m.hostStart = nil
             if let host = Backfill.host(for: s) {
                 m.hostPid = host.pid
                 m.hostStart = host.start
@@ -568,9 +579,11 @@ final class Tracker {
         }
     }
 
-    /// The hook's state plus what the app worked out itself.
+    /// The hook's state plus what the app worked out itself, for this Claude process only.
     private func effective(_ s: SessionState) -> SessionState {
-        Backfill.withHost(s, saved.meta[s.sessionId].map { ($0.hostPid, $0.hostStart) })
+        Backfill.withHost(s, saved.meta[s.sessionId].flatMap {
+            Backfill.forProcess($0.hostLookedUp, s.claudePid) ? (pid: $0.hostPid, start: $0.hostStart) : nil
+        })
     }
 
     /// Sessions that ended without you closing them: their files go, and the restore ledger keeps
@@ -730,6 +743,18 @@ enum Backfill {
         e.hostPid = pid
         e.hostStart = host?.start
         return e
+    }
+
+    /// List the terminal's panes for a session without a tty-confirmed pane, even one with a learned
+    /// pane (1.2 app state has those): only a listing confirms one. Once per session start.
+    static func needsListing(exact: String?, learns: Bool, restores: Bool, claudeStart: Double?, listedAt: Double?) -> Bool {
+        exact == nil && learns && restores && (claudeStart ?? 0) > (listedAt ?? 0)
+    }
+
+    /// What the app worked out for a Claude process counts for that process only: a resume runs in a
+    /// new one, possibly under another terminal and in another tab.
+    static func forProcess(_ workedOutFor: Int32?, _ claudePid: Int32?) -> Bool {
+        workedOutFor != nil && workedOutFor == claudePid
     }
 
     static func whyNotRestorable(adapter: String, restores: Bool, host: Int32?, pane: String?) -> String? {

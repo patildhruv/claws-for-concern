@@ -215,6 +215,14 @@ enum SelfTest {
                 && recorded.flatMap { Backfill.host(for: $0) } == nil
                 && pre13.flatMap { Backfill.host(for: $0, ancestor: { ProcInfo.info($0) }) } == nil
                 && recorded.map { Backfill.withHost($0, (99, 1)).hostPid } == 1234)
+        check("upgrade: what Claws worked out counts for that Claude process only (a resume is a new one)",
+              Backfill.forProcess(100, 100) && !Backfill.forProcess(100, 200) && !Backfill.forProcess(nil, 100) && !Backfill.forProcess(nil, nil))
+        check("upgrade: a session with only a learned pane (1.2 app state) still gets listed, once per start",
+              Backfill.needsListing(exact: nil, learns: true, restores: true, claudeStart: 50, listedAt: nil)
+                && Backfill.needsListing(exact: nil, learns: true, restores: true, claudeStart: 50, listedAt: 40)
+                && !Backfill.needsListing(exact: nil, learns: true, restores: true, claudeStart: 50, listedAt: 60)
+                && !Backfill.needsListing(exact: "TAB", learns: true, restores: true, claudeStart: 50, listedAt: nil)
+                && !Backfill.needsListing(exact: nil, learns: true, restores: false, claudeStart: 50, listedAt: nil))
         check("not remembered, with the reason", Backfill.whyNotRestorable(adapter: "tmux", restores: false, host: 1, pane: "P") != nil
               && Backfill.whyNotRestorable(adapter: "Ghostty", restores: true, host: nil, pane: "P") == "the terminal it ran in is not known"
               && Backfill.whyNotRestorable(adapter: "Ghostty", restores: true, host: 1, pane: nil) == "its tab was never matched by tty"

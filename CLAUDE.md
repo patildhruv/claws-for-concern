@@ -234,9 +234,13 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   tracker backfills: for a live session with no host it walks up from its live Claude process (as
   the hook does) once per process, into `Meta.hostPid` (app state, never the hook's file), and uses
   `effective(s)` (`s.hostPid ?? meta`) everywhere, the tty-map check and `retire` included; `raw`
-  keeps the files as written, for removing them safely. **Never silent**: `retire` and `remember`
-  log every session not remembered, with why (not restorable there, terminal unknown, tab never
-  matched by tty, Restore off).
+  keeps the files as written, for removing them safely. What the app works out (host, tty-confirmed
+  pane) counts only for the Claude process it was found for (`hostLookedUp`, `paneFor`): a resume
+  is a new process, possibly elsewhere. A session with only a learned pane (1.2 app state has
+  those) still gets a listing (`Backfill.needsListing`): only that confirms its tab by tty.
+  **Never silent**: `retire` and `remember` log every session not remembered, with why (not
+  restorable there, terminal unknown, tab never matched by tty, Restore off). Upgrade simulated on a
+  test copy (3 windows, 6 sessions, 1.2 files and 1.2 app state): 6 remembered, 6 resumed.
 - Every Ghostty script body sits inside `if application id … is running`: NSRunningApplication read
   off the main thread can lag a quit, and telling a quit app anything relaunches it.
 - Ghostty's tty map stores the Ghostty pid with each sighting and answers only for the session's own
