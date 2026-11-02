@@ -114,6 +114,33 @@ Optional members, with defaults:
 | `scriptedBundleID` | nil | you drive the app over AppleScript (the app asks for the Automation permission for it) |
 | `tracksSeenItself` | false | the terminal knows what you have seen (herdr's `done` vs `idle`): then no keyboard/mouse activity is required |
 | `learnsPanes`, `focusedPane(front:)`, `panes()` | false, nil, [] | nothing in the environment names the pane: the tracker learns it from the tab you type a prompt into, then by folder and title (Ghostty) |
+| `newPane(in:typing:)` | false | your terminal can open a new tab or pane in a folder and type into its shell: Search uses it to resume a session that is no longer running (see below) |
+
+#### `newPane(in:typing:)`
+
+Search's Resume calls it through `Terminals.newPane`, which first launches your app if it is not
+running (without bringing it forward) and gets its Automation permission, both on the prompt thread.
+Your method then runs on the worker: open a **new** tab, pane or window in `dir`, type `command` into
+its shell followed by Return (typed, not run as the pane's command, so the user's aliases work and the
+shell stays open), bring it forward, and return whether that worked. Never type into an existing pane.
+`dir` is an absolute path and `command` is the user's own resume command with a validated session ID,
+but quote both for your script or CLI all the same. Ghostty's version, for reference:
+
+```applescript
+tell application id "com.mitchellh.ghostty"
+  set cfg to {initial working directory:"<dir>", initial input:"<command>" & linefeed}
+  if (count of windows) > 0 then
+    new tab in front window with configuration cfg
+  else
+    new window with configuration cfg
+  end if
+  activate
+end tell
+```
+
+Put the script in a static function and compile it in `--selftest` (`NSAppleScript.compileAndReturnError`
+reads the app's dictionary without sending it anything), as `GhosttyAdapter.newPaneScript` is. Try it
+live in a throwaway terminal window, never one with sessions you care about.
 
 ### 4. Register it
 

@@ -16,7 +16,8 @@ Public repo: github.com/patildhruv/claws-for-concern (MIT). See `docs/code-map.m
 UNIVERSAL=1 ./build.sh      # arm64 + x86_64, for releases
 SIGN_IDENTITY="Apple Development: …" ./build.sh   # stable signature (see TCC below)
 B="build/Claws for Concern.app/Contents/MacOS/ClawsForConcern"
-$B --selftest               # must print ALL PASS (includes a byte-exact round trip of ~/.claude/settings.json)
+$B --selftest               # must print ALL PASS (includes a byte-exact round trip of ~/.claude/settings.json
+                            #   and the search helper's own self-test)
 $B --recap "text"           # the app's recap code path, prints the line or the error
 $B --fetch-art              # download + convert the Clawd GIFs now, print sprite sizes
 $B --install-hooks | --remove-hooks | --hooks-status
@@ -28,8 +29,9 @@ $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps i
 $B --snapshot-settings DIR  # every Settings pane, offscreen (switches render "off" there: use the real window)
 ```
 
-Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse-as-library`,
-`Sources/Shared` + `Sources/App/**`) and the hook (`Sources/Shared` + `Sources/Hook`, Foundation only).
+Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-parse-as-library`,
+`Sources/Shared` + `Sources/App/**` + `Sources/Search/ResumeRequest.swift`), the hook (`Sources/Shared` +
+`Sources/Hook`, Foundation only) and the search helper (`-parse-as-library`, `Sources/Search/*.swift`).
 
 ## Non-negotiables
 
@@ -122,6 +124,24 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Two binaries: the app (`-parse
   - **iTerm2 / Terminal**: matched by the session's `tty` (iTerm2 `tty of session`, Terminal `tty of
     tab`). Both need Automation; the app asks the first time one of their sessions gets a Clawd.
     Scripts compile against the dictionaries in `--selftest`; not exercised live (needs consent).
+
+## Search (`Sources/Search/`, guide: docs/search.md)
+
+- A separate app inside the bundle, `Contents/Helpers/Claws Search.app`, opened by the crab menu's
+  "Search Sessions…" (`SearchHelper.open`). It quits when its window closes, so its index (peak about
+  420 MB RSS / 290 MB footprint for 545 sessions) never lives in the always-running app.
+- Resume never scripts a terminal from the helper: it posts `…claws-for-concern.resumeSession`;
+  `SearchHelper` switches to a running session through `Tracker.open`, else opens a Ghostty tab in the
+  session's folder with `Terminals.newPane` and types `Settings.resumeCommand`, then answers with
+  `…resumeSessionReply`. No answer within 2 s, or a failure: the helper copies the command instead.
+- `Sources/Search/ResumeRequest.swift` is compiled into both binaries: the payload, its validation and
+  its tests. **Any process can post that notification**: Claws accepts only a UUID and an absolute
+  folder that Claude Code filed the session under (`~/.claude/projects/<encoded folder>/<id>.jsonl`).
+- **The helper must never stat or list inside ~/Documents, ~/Desktop, ~/Downloads, iCloud or
+  /Volumes** (privacy prompt). Reading `~/.claude` is fine.
+- Commands (`H=".../Contents/Helpers/Claws Search.app/Contents/MacOS/ClawsSearch"`): `$H --selftest`,
+  `$H --search "words" [--limit N] [--recent] [--scope …]`, `$H --resume <id prefix>` (asks the running
+  Claws, for real), `$H --snapshot out.png [--query q]` (offscreen, takes no focus).
 
 ## Settings, placement, the Dock
 
