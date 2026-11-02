@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The search helper, Contents/Helpers/Claws Search.app. build.sh adds CFBundleShortVersionString
+     and CFBundleVersion from the app's Info.plist. A regular app (no LSUIElement): Dock icon and
+     menus while its window is open, and it quits when the window closes. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Claws Search</string>
+    <key>CFBundleDisplayName</key>
+    <string>Claws Search</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.patildhruv.claws-for-concern.search</string>
+    <key>CFBundleExecutable</key>
+    <string>ClawsSearch</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>SearchIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Part of Claws for Concern, an unofficial fan project.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
