@@ -65,6 +65,10 @@ struct SessionCommands: Commands {
         CommandGroup(replacing: .appInfo) {
             Button("About Claws Search") { AboutBox.show() }
         }
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") { ClawsSettings.open() }
+                .keyboardShortcut(",")
+        }
         CommandGroup(after: .textEditing) {
             Button("Find…") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
                 .keyboardShortcut("f")
@@ -91,6 +95,22 @@ struct SessionCommands: Commands {
 }
 
 /// "Claws Search, part of Claws for Concern <version>", with the project's page.
+/// Settings… (⌘,) opens Claws for Concern's Settings, through the notification `--open-settings` posts.
+enum ClawsSettings {
+    static let note = Notification.Name(ResumeRequest.appID + ".openSettings")
+
+    static func open() {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: ResumeRequest.appID).isEmpty else {
+            let a = NSAlert()
+            a.messageText = "Claws for Concern isn't running"
+            a.informativeText = "Open Claws for Concern from Applications, then choose Settings… again."
+            a.runModal()
+            return
+        }
+        DistributedNotificationCenter.default().postNotificationName(note, object: nil, userInfo: nil, deliverImmediately: true)
+    }
+}
+
 enum AboutBox {
     static let repo = URL(string: "https://github.com/patildhruv/claws-for-concern")!
 

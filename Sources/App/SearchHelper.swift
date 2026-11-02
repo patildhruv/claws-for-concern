@@ -1,5 +1,21 @@
 import AppKit
 
+/// Whether a launch was you opening the app (Search comes up) or macOS starting it (stay quiet).
+enum LaunchIntent {
+    /// 'oapp' from Finder, Spotlight, the Dock or `open`; not a login item ('lgit') or a service ('svit');
+    /// not on first run, where the hooks question comes first; and, in case a login launch is not
+    /// marked, not in the first 3 minutes after the Mac starts. No launch event: stay quiet.
+    static func opensSearch(eventID: AEEventID?, propData: OSType?, uptime: TimeInterval, firstRun: Bool) -> Bool {
+        guard eventID == AEEventID(kAEOpenApplication), !firstRun, uptime >= 180 else { return false }
+        return propData != OSType(keyAELaunchedAsLogInItem) && propData != OSType(keyAELaunchedAsServiceItem)
+    }
+
+    /// 'oapp', 'lgit'… for the log.
+    static func fourCC(_ c: UInt32) -> String {
+        String(bytes: [24, 16, 8, 0].map { UInt8((c >> $0) & 0xff) }, encoding: .macOSRoman) ?? "\(c)"
+    }
+}
+
 /// Search lives in its own app inside the bundle (Contents/Helpers/Claws Search.app): its index, a few
 /// hundred MB, is only in memory while the window is open, and a crash there never takes the Clawds
 /// down. It asks us to resume a session with a distributed notification (`ResumeRequest`), and we

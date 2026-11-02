@@ -2,7 +2,9 @@
 
 Find any past Claude Code conversation by what was said in it, and resume it. Search is a separate
 app inside the bundle, `Claws for Concern.app/Contents/Helpers/Claws Search.app` (SwiftUI, sources in
-`Sources/Search/`), opened from the crab menu's **Search Sessions…**. It began as a standalone app,
+`Sources/Search/`), opened from the crab menu's **Search Sessions…**, or by opening Claws for Concern itself
+(Spotlight, the Dock, Finder: `applicationShouldHandleReopen`, or a launch that is not a login item;
+`LaunchIntent`). Its app menu has **Settings…** (⌘,), which posts Claws' `openSettings` notification. It began as a standalone app,
 Session Search, and joined Claws for Concern in 1.3.
 
 - **Its own process.** The index lives only while the window is open: the helper quits when its

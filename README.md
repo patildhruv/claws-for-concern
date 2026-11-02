@@ -81,8 +81,9 @@ corners and the Dock's strip; only the menu bar is kept clear (or switch on *Kee
 
 ## Find any session
 
-Menu bar crab → **Search Sessions…** searches every Claude Code conversation on your Mac: your prompts,
-Claude's replies, tool calls and subagents, plus each session's name, folder and ID.
+**Open Claws for Concern** (Spotlight, the Dock or Finder) or choose **Search Sessions…** from the menu bar
+crab, and search every Claude Code conversation on your Mac: your prompts, Claude's replies, tool calls
+and subagents, plus each session's name, folder and ID. ⌘, from there opens Settings.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/search-dark.png">
@@ -219,7 +220,8 @@ folders, so macOS never asks you about them on its behalf.
 
 ## Settings
 
-Menu bar crab → **Settings…** (⌘,), or open the app again from Applications. While Settings is open the
+Menu bar crab → **Settings…**, or **⌘,** in the Search window (opening the app from Spotlight brings up
+Search). Starting at login stays quiet. While Settings is open the
 app gets a Dock icon and a menu bar, like any Mac app, and drops them when you close it.
 
 <p align="center">

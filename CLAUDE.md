@@ -267,7 +267,13 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
 ## Search (`Sources/Search/`, guide: docs/search.md)
 
 - A separate app inside the bundle, `Contents/Helpers/Claws Search.app`, opened by the crab menu's
-  "Search Sessions…" (`SearchHelper.open`). It quits when its window closes, so its index (peak about
+  "Search Sessions…" (`SearchHelper.open`), and by opening the app itself: reopening it while it runs, or
+  launching it yourself (`LaunchIntent`: an 'oapp' launch event that is not a login item 'lgit', not
+  first run, and not in the first 3 minutes after boot; the log says `launch: oapp …`). **The launch
+  event is current only in `applicationDidFinishLaunching`**: read in `applicationWillFinishLaunching`
+  it is nil, which looked like "quiet" for login launches and silently broke normal ones. Search's app
+  menu has Settings… (⌘,), posting the same `openSettings` notification as `--open-settings`.
+  Search quits when its window closes, so its index (peak about
   420 MB RSS / 290 MB footprint for 545 sessions) never lives in the always-running app.
 - Resume never scripts a terminal from the helper: it posts `…claws-for-concern.resumeSession`;
   `SearchHelper` switches to a running session through `Tracker.open`, else opens a Ghostty tab in the

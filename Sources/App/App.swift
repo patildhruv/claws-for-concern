@@ -27,6 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsPostPending = false
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        // The launch event is current only now (not yet in applicationWillFinishLaunching): did you open
+        // the app, or did macOS start it at login?
+        let ev = NSAppleEventManager.shared().currentAppleEvent
+        let prop = ev?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue
+        let opensSearch = LaunchIntent.opensSearch(eventID: ev?.eventID, propData: prop,
+                                                   uptime: ProcessInfo.processInfo.systemUptime,
+                                                   firstRun: !Settings.didAskHooks && HooksInstaller.status() == .absent)
         let me = NSRunningApplication.current
         if NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
             .contains(where: { $0.processIdentifier != me.processIdentifier }) {
@@ -78,6 +85,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // copy that still exists (a dev build) is left alone; Settings offers Repair instead.
         if case .outdated = HooksInstaller.status(), HooksInstaller.pointsAtMissingCopy { _ = try? HooksInstaller.install() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.firstRun() }
+        AppLog.write("launch: \(ev.map { LaunchIntent.fourCC($0.eventID) } ?? "no event")"
+                     + (prop.map { " " + LaunchIntent.fourCC($0) } ?? "") + (opensSearch ? ", opening Search" : ", quiet"))
+        if opensSearch { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { SearchHelper.open() } }
 
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification,
                                                           object: nil, queue: .main) { note in
@@ -92,12 +102,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Opening the app again while it runs (the way back when the menu bar crab is hidden).
-        openSettings()
+        // Opening the app again while it runs (Spotlight, the Dock, Finder) is the quick way to Search;
+        // Settings is ⌘, from there, or the crab menu.
+        SearchHelper.open()
         return false
     }
 
-    static let openSettingsNote = Notification.Name("io.github.patildhruv.claws-for-concern.openSettings")
+    /// Also posted by the search helper's Settings… (⌘,), so the name is built from the shared app ID.
+    static let openSettingsNote = Notification.Name(ResumeRequest.appID + ".openSettings")
 
     func openSettings(tab: String? = nil) {
         if settingsWindow == nil {

@@ -584,6 +584,18 @@ enum SelfTest {
     static func search() {
         for (name, ok) in ResumeBridgeTests.run() { check(name, ok) }
 
+        let oapp = AEEventID(kAEOpenApplication), login = OSType(keyAELaunchedAsLogInItem)
+        check("launch: opening the app yourself opens Search",
+              LaunchIntent.opensSearch(eventID: oapp, propData: nil, uptime: 3600, firstRun: false))
+        check("launch: at login, on first run, without a launch event or right after boot: quiet",
+              !LaunchIntent.opensSearch(eventID: oapp, propData: login, uptime: 3600, firstRun: false)
+              && !LaunchIntent.opensSearch(eventID: oapp, propData: OSType(keyAELaunchedAsServiceItem), uptime: 3600, firstRun: false)
+              && !LaunchIntent.opensSearch(eventID: oapp, propData: nil, uptime: 3600, firstRun: true)
+              && !LaunchIntent.opensSearch(eventID: nil, propData: nil, uptime: 3600, firstRun: false)
+              && !LaunchIntent.opensSearch(eventID: oapp, propData: nil, uptime: 60, firstRun: false))
+        check("search: its Settings… posts the notification Claws listens for",
+              AppDelegate.openSettingsNote.rawValue == "io.github.patildhruv.claws-for-concern.openSettings")
+
         let id = "0f1e2d3c-4b5a-6978-8a9b-acbdcedfe0f1"
         let now = Date().timeIntervalSince1970
         let r = ResumeRequest(sessionId: id, folder: "/Users/someone/code", nonce: "n1", sent: now)
