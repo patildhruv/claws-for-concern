@@ -19,6 +19,7 @@ enum SelfTest {
         installer()
         text()
         art()
+        search()
         print(failures == 0 ? "ALL PASS" : "\(failures) FAILED")
         return failures == 0 ? 0 : 1
     }
@@ -255,6 +256,54 @@ enum SelfTest {
         check("tab: plain shell matches when you typed there", TabMatch.matches(shellTab, rootCwd: "/w", cwd: "/w", title: "Fix login test", strong: true))
         check("tab: untitled session matches by folder", TabMatch.matches(claudeTab, rootCwd: "/w", cwd: "/w", title: nil, strong: false))
         check("shell quoting", "/Users/a b".shellQuoted == "'/Users/a b'" && "/Users/ab".shellQuoted == "/Users/ab")
+    }
+
+    /// The search helper: resume requests, the new-tab script, the helper in the bundle and its own self-test.
+    static func search() {
+        for (name, ok) in ResumeBridgeTests.run() { check(name, ok) }
+        check("search: the helper reads the same resume command as Settings", ResumeCommand.template(.standard) == Settings.resumeCommand,
+              "\(ResumeCommand.template(.standard)) vs \(Settings.resumeCommand)")
+
+        let id = "0f1e2d3c-4b5a-6978-8a9b-acbdcedfe0f1"
+        let r = ResumeRequest(sessionId: id, folder: "/Users/someone/code")
+        check("search: a running session is switched to, never resumed twice",
+              SearchHelper.plan(r, live: true, filed: false, template: "claude -r {id}") == .focus)
+        check("search: a closed session gets a new tab typing the resume command",
+              SearchHelper.plan(r, live: false, filed: true, template: "claude -r {id}") == .newPane(command: "claude -r \(id)"))
+        if case .refuse = SearchHelper.plan(r, live: false, filed: false, template: "claude -r {id}") {
+            check("search: no tab in a folder the session is not filed under", true)
+        } else {
+            check("search: no tab in a folder the session is not filed under", false)
+        }
+
+        final class Plain: TerminalAdapter {
+            let id = "plain", name = "Plain"
+            func claims(_ s: SessionState) -> Bool { false }
+            func lookedAt(front: FrontApp) -> Set<String> { [] }
+            func focus(paneID: String, session: SessionState) -> Bool { false }
+            func health() -> AdapterHealth { AdapterHealth(level: .ready, detail: "") }
+        }
+        check("search: adapters open no new panes unless they say so", !Plain().newPane(in: "/w", typing: "true"))
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: GhosttyAdapter.bundleID) != nil {
+            var err: NSDictionary?
+            let src = GhosttyAdapter.newPaneScript(in: "/Users/someone/a \"b\" \\c", typing: "claude --resume \(id)")
+            check("applescript compiles against Ghostty's dictionary (new tab)", NSAppleScript(source: src)?.compileAndReturnError(&err) == true,
+                  String(describing: err))
+        }
+
+        guard let helper = Bundle(url: SearchHelper.url), let exe = helper.executableURL else {
+            check("search: helper in the bundle", false, SearchHelper.url.path); return
+        }
+        let version = { (b: Bundle) in ["CFBundleShortVersionString", "CFBundleVersion"].map { b.object(forInfoDictionaryKey: $0) as? String } }
+        check("search: helper in the bundle, same version", helper.bundleIdentifier == ResumeRequest.appID + ".search"
+              && version(helper) == version(Bundle.main), "\(helper.bundleIdentifier ?? "?") \(version(helper)) vs \(version(Bundle.main))")
+        guard let res = Command.run(exe.path, ["--selftest"], timeout: 300) else {
+            check("search: helper self-test ran", false, exe.path); return
+        }
+        let lines = res.out.split(separator: "\n")
+        for l in lines where l.hasPrefix("info ") || l.hasPrefix("FAIL") { print("     helper: " + l.prefix(140)) }
+        check("search: helper self-test (\(lines.filter { $0.hasPrefix("PASS") }.count) checks) prints ALL PASS",
+              res.status == 0 && lines.last == "ALL PASS", "exit \(res.status)")
     }
 
     /// Builds a two-frame GIF on a 110 x 74 canvas (2 px per art pixel) and converts it back.

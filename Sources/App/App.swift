@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                             queue: .main) { [weak self] note in
             self?.openSettings(tab: note.object as? String)
         }
+        SearchHelper.listen(tracker: tracker)
         Notifier.shared.onOpen = { [weak self] sid in self?.tracker.open(sid) }
         // Every defaults change (Settings window, menus, drags) becomes one coalesced .settingsChanged.
         NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in

@@ -105,3 +105,30 @@ final class HostAppAdapter: TerminalAdapter {
         AdapterHealth(level: .ready, detail: "Clicking brings the terminal or editor forward. A Clawd clears when you prompt that session or dismiss it.")
     }
 }
+
+// MARK: - New tabs (Search resumes a session that is no longer open)
+
+extension GhosttyAdapter {
+    /// A new tab in the front window (a new window when there is none) in `dir`, with `command` typed
+    /// into its shell: typed rather than run, so the user's aliases apply and the tab stays open after.
+    /// Never types into an existing terminal.
+    static func newPaneScript(in dir: String, typing command: String) -> String {
+        """
+        with timeout of 5 seconds
+          tell application id "com.mitchellh.ghostty"
+            set cfg to {initial working directory:\(Script.quote(dir)), initial input:\(Script.quote(command)) & linefeed}
+            if (count of windows) > 0 then
+              new tab in front window with configuration cfg
+            else
+              new window with configuration cfg
+            end if
+            activate
+          end tell
+        end timeout
+        """
+    }
+
+    func newPane(in dir: String, typing command: String) -> Bool {
+        Script.run(GhosttyAdapter.newPaneScript(in: dir, typing: command)) != nil
+    }
+}

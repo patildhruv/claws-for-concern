@@ -70,6 +70,10 @@ protocol TerminalAdapter: AnyObject {
     /// Worker, learning adapters only: the focused pane when the app is in front, and every pane.
     func focusedPane(front: FrontApp) -> PaneInfo?
     func panes() -> [PaneInfo]
+
+    /// Worker, optional (default false): open a new pane in `dir` and type `command` into its shell
+    /// (Search resumes a session this way). See `Terminals.newPane` for what happens before it.
+    func newPane(in dir: String, typing command: String) -> Bool
 }
 
 extension TerminalAdapter {
@@ -396,5 +400,51 @@ final class ScriptThread {
 enum Presence {
     static var idleSeconds: Double {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+    }
+}
+
+// MARK: - New panes (Search resumes a session that is no longer open)
+
+extension TerminalAdapter {
+    func newPane(in dir: String, typing command: String) -> Bool { false }
+}
+
+extension Terminals {
+    /// Opens a new pane in `dir` through the adapter and types `command` into it. A scripted terminal
+    /// that is not running is launched first, and its Automation permission is asked for if needed;
+    /// either can take a while, so both happen on the prompt thread and only the script itself runs
+    /// on the worker. `done` (main thread) says whether the pane opened.
+    func newPane(_ a: TerminalAdapter, in dir: String, typing command: String, done: @escaping (Bool) -> Void) {
+        prompter.run {
+            if let b = a.scriptedBundleID {
+                let ready = Terminals.launchIfNeeded(b)
+                let mine = ready && Automation.startAsking(b)
+                let status = ready ? Automation.check(b, ask: true) : .notRunning
+                if mine { Automation.doneAsking(b) }
+                guard status == .granted else { DispatchQueue.main.async { done(false) }; return }
+            }
+            self.worker.run {
+                let ok = a.newPane(in: dir, typing: command)
+                DispatchQueue.main.async { done(ok) }
+            }
+        }
+    }
+
+    /// Prompt thread. Launches the app (without bringing it forward) unless it runs, and waits up to
+    /// 10 s for it to finish launching. False if it is not installed or never got there.
+    private static func launchIfNeeded(_ bundleID: String) -> Bool {
+        func app() -> NSRunningApplication? { NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first }
+        if app()?.isFinishedLaunching == true { return true }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return false }
+        if app() == nil {
+            let cfg = NSWorkspace.OpenConfiguration()
+            cfg.activates = false
+            DispatchQueue.main.async { NSWorkspace.shared.openApplication(at: url, configuration: cfg) }
+        }
+        for _ in 0..<50 {
+            if app()?.isFinishedLaunching == true { return true }
+            usleep(200_000)
+        }
+        return false
     }
 }

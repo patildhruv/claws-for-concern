@@ -76,6 +76,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             menu.addItem(BlockItem("Dismiss All") { [weak self] in self?.tracker.acknowledgeAll() })
         }
         menu.addItem(.separator())
+        menu.addItem(BlockItem("Search Sessions…", key: "f") { SearchHelper.open() })
 
         if Settings.pausedUntil == nil {
             let pause = NSMenu()
