@@ -332,7 +332,8 @@ enum CLI {
                                 track sessions and restore without the menu bar app, printing each step
                                 (needs its own CLAWS_HOME; the restore commands take --bundle-id ID, a
                                 copy of Ghostty to drive; --restore-on: as if Restore were on, this
-                                process only; --assume-active S: count as typing for S seconds)
+                                process only; --assume-active S: count as typing for S seconds;
+                                --fail-typing: typing errors after its keys, never retried)
               --displays        list displays and each one's saved spot
               --open-settings [TAB]  open the running app's Settings (general, clawds, appearance, …)
               --selftest        run the built-in checks (prints ALL PASS)

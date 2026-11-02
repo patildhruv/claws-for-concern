@@ -404,6 +404,8 @@ enum SelfTest {
               typing.contains("if (pid of t) is not 7 then return \"moved\"") && typing.contains("is \"AB\" then return \"busy\"")
                 && at("return \"moved\"") < at("return \"busy\"") && at("return \"busy\"") < at("send key \"e\"")
                 && at("send key \"e\"") < at("send key \"u\"") && at("send key \"u\"") < at("input text") && typing.hasSuffix("return \"gone\""))
+        check("ghostty: the test fault is off unless the CLI asks for it", !GhosttyAdapter.failAfterTyping
+              && !typing.contains("error \"test"))
         check("ghostty: no focus check while you are not typing",
               !GhosttyAdapter.typeScript(app: "x.y", terminal: "AB", shell: 7, deferIfFocused: false, command: "c").contains("busy"))
         check("ghostty: window-save-state from +show-config", GhosttyAdapter.saveState("font-size = 13\nwindow-save-state = always\n") == "always"

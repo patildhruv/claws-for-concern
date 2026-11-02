@@ -174,6 +174,10 @@ final class GhosttyAdapter: TerminalAdapter {
     /// `expected` nil accepts any Ghostty process.
     static func sameProcess(_ running: Int32, _ expected: Int32?) -> Bool { expected == nil || running == expected }
 
+    /// Tests only (the CLI's `--fail-typing`): the typing script raises a timeout right after its keys,
+    /// as one that timed out part way would. The app never sets it.
+    static var failAfterTyping = false
+
     /// One script, so nothing can change between its checks and its keys: "moved" (nothing sent) unless
     /// `shell` is still the tab's foreground process; with `deferIfFocused` (you typed a moment ago),
     /// "busy" (nothing sent) while Ghostty is in front with that tab focused. Then Ctrl-E and Ctrl-U
@@ -200,6 +204,7 @@ final class GhosttyAdapter: TerminalAdapter {
             send key "u" action release modifiers "control" to t
             input text \(Script.quote(command)) to t
             send key "enter" to t
+            \(failAfterTyping ? "error \"test: a timeout after the keys\" number -1712" : "")
           end tell
         end timeout
         return "ok"

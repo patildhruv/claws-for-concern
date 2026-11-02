@@ -548,7 +548,7 @@ final class Restorer {
                 let typing = String(format: "last keystroke %.1f s ago, any input %.1f s ago", idle, Presence.idleSeconds)
                 switch (step, result.map(RestorePlan.after)) {
                 case (.later, _):
-                    self.log("\(id): later (no answer from \(a.name))")
+                    self.log("\(id): later (no answer from \(a.name), or it is not the process of this launch)")
                     self.resume(a, rest, later: later + [e], launch: launch, gen: gen, until: deadline)
                 case (.drop(let why), _):
                     self.forget([e], why: "not resumed, " + why)
@@ -714,6 +714,8 @@ enum RestoreCLI {
         }
         // Restore switched off in Settings, but a test needs it in this process only.
         Restorer.shared.forceOn = args.contains("--restore-on")
+        // Tests: every typing ends in an error after its keys (is it ever retried?).
+        GhosttyAdapter.failAfterTyping = args.contains("--fail-typing")
     }
 
     /// `--watch` writes the ledger and app state as the app does: only into a data folder of its own.

@@ -27,7 +27,9 @@ $B --restore-status         # the restore ledger, the terminal's panes, and the 
 $B --restore-run [--yes] [--command T]   # the app's restore, now (--yes: type without asking; else read-only)
 $B --watch [--yes] [--seconds N] [--command T]   # tracker + restore without the UI; needs its own CLAWS_HOME
                             # (--bundle-id ID drives a Ghostty copy; --restore-on: as if Restore were on,
-                            #  this process only; --assume-active S: you count as typing for S seconds)
+                            #  this process only; --assume-active S: you count as typing for S seconds;
+                            #  --fail-typing: every typing script errors after its keys, to test it is
+                            #  never retried)
 $B --displays               # each display's UUID and saved spot
 $B --open-settings [TAB]    # opens the running app's Settings on a tab (distributed notification)
 $B --snapshot DIR           # README renders; tools/make-readme-media.sh wraps it (needs ffmpeg)
