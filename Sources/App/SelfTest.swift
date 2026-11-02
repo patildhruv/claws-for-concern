@@ -189,6 +189,37 @@ enum SelfTest {
         check("hook: a Claude process with no terminal above it is never its own host", orphan?.hostPid == nil && orphan?.hostStart == nil)
         check("hook: the terminal process of this test is found", ProcInfo.hostAncestor(of: getpid()).map { $0.ppid <= 1 } == true)
 
+        // Upgrading to 1.3: a session already running, idle since, has a file the 1.2 hook wrote (no
+        // host). The app works the host out from its live Claude process (here: this test), then its
+        // tab by tty.
+        let thisPid = getpid(), thisStart = ProcInfo.info(getpid())?.start ?? 0
+        let file12 = """
+        {"session_id":"\(UUID().uuidString.lowercased())","cwd":"/w","root_cwd":"/w","status":"finished","status_ts":1,"updated_ts":1,\
+        "claude_pid":\(thisPid),"claude_start":\(thisStart),"tty":"/dev/ttys099"}
+        """
+        let pre13 = try? JSONDecoder().decode(SessionState.self, from: Data(file12.utf8))
+        let found = pre13.flatMap { Backfill.host(for: $0) }
+        check("upgrade: a 1.2 session file has no host", pre13 != nil && pre13?.hostPid == nil)
+        check("upgrade: its terminal is worked out from the live Claude process, as the hook would",
+              found != nil && found?.pid == ProcInfo.hostAncestor(of: thisPid)?.pid && found?.pid != thisPid)
+        let backfilled = pre13.map { (s: SessionState) in Backfill.withHost(s, found.map { (pid: $0.pid, start: $0.start) }) }
+        var seen = TTYMap()
+        seen.list([PaneInfo(id: "TAB", cwd: "/w", name: "", tty: "/dev/ttys099")], at: thisStart + 1, host: found?.pid ?? -1)
+        check("upgrade: then its tab is found by tty (without the host it is not)",
+              seen.pane(tty: backfilled?.tty, since: backfilled?.claudeStart, host: backfilled?.hostPid) == "TAB"
+                && seen.pane(tty: pre13?.tty, since: pre13?.claudeStart, host: pre13?.hostPid) == nil)
+        var recorded = pre13
+        recorded?.hostPid = 1234
+        check("upgrade: never for a dead process, or one the hook already recorded, or one with no terminal above it",
+              pre13.flatMap { Backfill.host(for: $0, alive: { _, _ in false }) } == nil
+                && recorded.flatMap { Backfill.host(for: $0) } == nil
+                && pre13.flatMap { Backfill.host(for: $0, ancestor: { ProcInfo.info($0) }) } == nil
+                && recorded.map { Backfill.withHost($0, (99, 1)).hostPid } == 1234)
+        check("not remembered, with the reason", Backfill.whyNotRestorable(adapter: "tmux", restores: false, host: 1, pane: "P") != nil
+              && Backfill.whyNotRestorable(adapter: "Ghostty", restores: true, host: nil, pane: "P") == "the terminal it ran in is not known"
+              && Backfill.whyNotRestorable(adapter: "Ghostty", restores: true, host: 1, pane: nil) == "its tab was never matched by tty"
+              && Backfill.whyNotRestorable(adapter: "Ghostty", restores: true, host: 1, pane: "P") == nil)
+
         // The ledger: IDs, one entry per pane and session, expiry, the lock.
         func uuid(_ n: Int) -> String { String(format: "%08d-0000-4000-8000-000000000000", n) }
         func entry(_ n: Int, _ pane: String, _ ended: Double, folder: String = "/w/p", host: Int32? = 900) -> RestoreEntry {

@@ -229,6 +229,14 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
 - An entry `remember`ed while its terminal already runs again (a late SessionEnd, a reap after that
   launch's restore looked) is stamped with that launch at once. Switching Restore off empties the
   ledger (Claws stops watching launches). The hook records the host only with a new Claude process.
+- **Sessions already running at the upgrade to 1.3 have no host in their files** (the 1.2 hook never
+  wrote one, and an idle session sends no events), so the first real Cmd-Q remembered 2 of 15. The
+  tracker backfills: for a live session with no host it walks up from its live Claude process (as
+  the hook does) once per process, into `Meta.hostPid` (app state, never the hook's file), and uses
+  `effective(s)` (`s.hostPid ?? meta`) everywhere, the tty-map check and `retire` included; `raw`
+  keeps the files as written, for removing them safely. **Never silent**: `retire` and `remember`
+  log every session not remembered, with why (not restorable there, terminal unknown, tab never
+  matched by tty, Restore off).
 - Every Ghostty script body sits inside `if application id … is running`: NSRunningApplication read
   off the main thread can lag a quit, and telling a quit app anything relaunches it.
 - Ghostty's tty map stores the Ghostty pid with each sighting and answers only for the session's own

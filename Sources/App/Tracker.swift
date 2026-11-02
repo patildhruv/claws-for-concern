@@ -31,6 +31,13 @@ final class Tracker {
         var promptSeen: Double = 0
         var startSeen: Double = 0
         var sprite: String?
+        /// The terminal process a session runs under, worked out by the app when the hook never
+        /// recorded it (sessions already running when 1.3 was installed, idle since). App state only:
+        /// the hook's files are never written by the app.
+        var hostPid: Int32?
+        var hostStart: Double?
+        /// The Claude process the app last looked for a host for: once per process.
+        var hostLookedUp: Int32?
     }
     private struct Saved: Codable {
         var meta: [String: Meta] = [:]
@@ -38,7 +45,10 @@ final class Tracker {
     }
     private struct Recap: Codable { let text: String; let ts: Double }
 
+    /// Live sessions as the app uses them: the hook's state, plus what the app worked out itself
+    /// (`effective`). `raw` is each file exactly as the hook wrote it, for removing it safely.
     private var states: [String: SessionState] = [:]
+    private var raw: [String: SessionState] = [:]
     private var saved = Saved()
     private var titleCache: [String: (size: UInt64, title: String?)] = [:]
     private var watcher: DispatchSourceFileSystemObject?
@@ -92,13 +102,16 @@ final class Tracker {
     // MARK: Reading the hook's files
 
     func reload() {
-        var fresh: [String: SessionState] = [:]
+        var loaded: [String: SessionState] = [:]
         var ended: [SessionState] = []
         let files = (try? FileManager.default.contentsOfDirectory(at: Paths.sessions, includingPropertiesForKeys: nil)) ?? []
         for f in files where f.pathExtension == "json" {
             guard let s = SessionState.load(f) else { continue }
-            if s.endedTs != nil { ended.append(s) } else { fresh[s.sessionId] = s }
+            if s.endedTs != nil { ended.append(s) } else { loaded[s.sessionId] = s }
         }
+        backfillHosts(loaded)
+        raw = loaded
+        let fresh = loaded.mapValues(effective)
         // While their pane is still known (it lives in `saved.meta`, pruned just below).
         let pending = retire(ended)
         states = fresh
@@ -525,7 +538,7 @@ final class Tracker {
     private func reapDeadSessions() {
         let now = Date().timeIntervalSince1970
         var vanished: [SessionState] = []
-        for (sid, s) in states {
+        for (sid, s) in raw {
             if let pid = s.claudePid {
                 if !ProcInfo.isAlive(pid: pid, start: s.claudeStart) { vanished.append(s) }
             } else if now - s.updatedTs > 48 * 3600 {
@@ -538,22 +551,50 @@ final class Tracker {
     /// For the restore, before it plans: no waiting for the next 10-second reap.
     func reapNow() { reapDeadSessions() }
 
+    /// The hook records a session's terminal process only when a new Claude process reports, so a
+    /// session already running when 1.3 was installed, and idle since, has none: work it out from
+    /// its live Claude process (the same walk the hook does), once per process, into app state.
+    private func backfillHosts(_ live: [String: SessionState]) {
+        for (sid, s) in live where s.hostPid == nil {
+            var m = saved.meta[sid] ?? Meta()
+            guard m.hostPid == nil, let pid = s.claudePid, m.hostLookedUp != pid else { continue }
+            m.hostLookedUp = pid
+            if let host = Backfill.host(for: s) {
+                m.hostPid = host.pid
+                m.hostStart = host.start
+                AppLog.write("restore: \(sid.prefix(8)): its terminal is process \(host.pid) (worked out by Claws; the hook had not recorded it)")
+            }
+            saved.meta[sid] = m
+        }
+    }
+
+    /// The hook's state plus what the app worked out itself.
+    private func effective(_ s: SessionState) -> SessionState {
+        Backfill.withHost(s, saved.meta[s.sessionId].map { ($0.hostPid, $0.hostStart) })
+    }
+
     /// Sessions that ended without you closing them: their files go, and the restore ledger keeps
-    /// the ones whose terminal can reopen their tab. Returns the IDs left for the next reload (the
-    /// hook held its lock, or just brought the session back).
+    /// the ones whose terminal can reopen their tab; every other one is reported with the reason.
+    /// `gone`: the hook's files as read. Returns the IDs left for the next reload (the hook held its
+    /// lock, or just brought the session back).
     private func retire(_ gone: [SessionState]) -> Set<String> {
         var keep: [RestoreEntry] = []
+        var skipped: [(id: String, why: String)] = []
         var pending = Set<String>()
-        for s in gone {
+        for file in gone {
+            let s = effective(file)
             let a = terminals.adapter(for: s)
             let pane = exactPane(s)
-            guard Tracker.removeSessionFile(s) else { pending.insert(s.sessionId); continue }
-            guard a.restoresPanes, let pane, s.hostPid != nil else { continue }
-            keep.append(RestoreEntry(sessionId: s.sessionId, adapter: a.id, pane: pane, folder: s.rootCwd, title: title(for: s),
+            guard Tracker.removeSessionFile(file) else { pending.insert(s.sessionId); continue }
+            if let why = Backfill.whyNotRestorable(adapter: a.name, restores: a.restoresPanes, host: s.hostPid, pane: pane) {
+                skipped.append((s.sessionId, why))
+                continue
+            }
+            keep.append(RestoreEntry(sessionId: s.sessionId, adapter: a.id, pane: pane ?? "", folder: s.rootCwd, title: title(for: s),
                                      endedTs: s.endedTs ?? s.updatedTs, reason: s.endReason ?? "vanished",
                                      hostPid: s.hostPid, hostStart: s.hostStart))
         }
-        restorer.remember(keep)
+        restorer.remember(keep, skipped: skipped)
         return pending
     }
 
@@ -666,6 +707,36 @@ final class Tracker {
         let enc = JSONEncoder()
         guard let data = try? enc.encode(saved) else { return }
         try? data.write(to: Paths.appState, options: .atomic)
+    }
+}
+
+/// What the app works out for sessions the hook knows less about (started before 1.3), and why a
+/// session is not remembered for a restore. Pure, for the self-test.
+enum Backfill {
+    /// The terminal process a running session lives under: its live Claude process's ancestor
+    /// directly under launchd, as the hook would have recorded it. Nil when the hook did, when that
+    /// process is gone, or when it has no terminal above it.
+    static func host(for s: SessionState, alive: (Int32, Double?) -> Bool = ProcInfo.isAlive,
+                     ancestor: (Int32) -> ProcInfo.Entry? = ProcInfo.hostAncestor) -> (pid: Int32, start: Double)? {
+        guard s.hostPid == nil, let pid = s.claudePid, alive(pid, s.claudeStart),
+              let h = ancestor(pid), h.pid != pid else { return nil }
+        return (h.pid, h.start)
+    }
+
+    /// `s` with the app's host when the hook recorded none.
+    static func withHost(_ s: SessionState, _ host: (pid: Int32?, start: Double?)?) -> SessionState {
+        guard s.hostPid == nil, let pid = host?.pid else { return s }
+        var e = s
+        e.hostPid = pid
+        e.hostStart = host?.start
+        return e
+    }
+
+    static func whyNotRestorable(adapter: String, restores: Bool, host: Int32?, pane: String?) -> String? {
+        if !restores { return "\(adapter) tabs are not restored" }
+        if host == nil { return "the terminal it ran in is not known" }
+        if pane == nil { return "its tab was never matched by tty" }
+        return nil
     }
 }
 

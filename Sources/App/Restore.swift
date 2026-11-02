@@ -358,9 +358,18 @@ final class Restorer {
     /// Sessions that ended with their tab: kept until their terminal reopens it. One that lands while
     /// its terminal already runs again (a late SessionEnd, a reap after that launch's restore looked)
     /// gets that launch as its only one: Claws cannot see launches it was not running for.
-    func remember(_ entries: [RestoreEntry]) {
-        let checked = entries.filter { ResumeRequest.isSessionID($0.sessionId) && $0.hostPid != nil }
-        guard !checked.isEmpty, enabled else { return }
+    /// Never silent: every session not remembered (`skipped`, and any dropped here) is logged with why.
+    func remember(_ entries: [RestoreEntry], skipped: [(id: String, why: String)] = []) {
+        var notKept = skipped
+        let checked = enabled ? entries.filter { ResumeRequest.isSessionID($0.sessionId) && $0.hostPid != nil } : []
+        for e in entries where !checked.contains(e) {
+            notKept.append((e.sessionId, !enabled ? "Restore is off" : ResumeRequest.isSessionID(e.sessionId)
+                ? "the terminal it ran in is not known" : "its session ID is not a UUID"))
+        }
+        if !notKept.isEmpty {
+            log("not remembered: " + notKept.map { "\($0.id.prefix(8)) (\($0.why))" }.joined(separator: ", "))
+        }
+        guard !checked.isEmpty else { return }
         let valid = Dictionary(grouping: checked, by: \.adapter).flatMap { aid, group in
             RestorePlan.stampedForRunning(group, runningLaunch: terminals.adapter(id: aid).flatMap(running)?.launchDate?.timeIntervalSince1970,
                                           hostAlive: hostAlive)
