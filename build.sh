@@ -21,9 +21,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$HELPER/Contents/MacOS
 
 for arch in $ARCHS; do
   FLAGS=(-O -swift-version 5 -target "$arch-apple-macos14.0")
-  # The app compiles the helper's request format too, so both sides of the notification agree.
-  xcrun swiftc $FLAGS -parse-as-library Sources/Shared/*.swift Sources/App/**/*.swift Sources/Search/ResumeRequest.swift \
-    -o "build/obj/app-$arch"
+  # The app compiles two of the helper's files too: the request format, so both sides of the
+  # notification agree, and the brand (the crab, clay and ink, the bubble), so both look alike.
+  xcrun swiftc $FLAGS -parse-as-library Sources/Shared/*.swift Sources/App/**/*.swift \
+    Sources/Search/ResumeRequest.swift Sources/Search/Brand.swift -o "build/obj/app-$arch"
   xcrun swiftc $FLAGS Sources/Shared/*.swift Sources/Hook/main.swift -o "build/obj/hook-$arch"
   xcrun swiftc $FLAGS -parse-as-library Sources/Search/*.swift -o "build/obj/search-$arch"
 done

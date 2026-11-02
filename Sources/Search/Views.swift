@@ -3,28 +3,35 @@ import SwiftUI
 
 extension Notification.Name {
     static let focusSearch = Notification.Name("ClawsSearch.focusSearch")
+    /// Back to the search field after a click in the list, the cursor at the end: the keys work there.
+    static let returnToSearch = Notification.Name("ClawsSearch.returnToSearch")
+}
+
+extension Color {
+    static let clay = Color(nsColor: Brand.clay)
+    static let clayText = Color(nsColor: Brand.clayText)
+    static let ink = Color(nsColor: Brand.ink)
 }
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        NavigationSplitView {
+        // A split view, not a sidebar: the results are content, and a translucent sidebar would put
+        // the text over whatever is behind the window, where no contrast can be promised.
+        HSplitView {
             ResultsColumn()
-                .navigationSplitViewColumnWidth(min: 340, ideal: 440, max: 720)
-        } detail: {
-            if let s = model.selectedSession {
-                DetailView(session: s)
-            } else if model.sessionCount == 0 && model.indexing {
-                ProgressView("Reading transcripts…")
-            } else {
-                ContentUnavailableView(model.query.isEmpty ? "No Sessions" : "No Matches",
-                                       systemImage: "magnifyingglass",
-                                       description: Text(model.query.isEmpty
-                                           ? "Nothing in ~/.claude/projects yet."
-                                           : "Try fewer words, or turn on more places under Search In."))
+                .frame(minWidth: 340, maxWidth: 640)
+            Group {
+                if let s = model.selectedSession {
+                    DetailView(session: s)
+                } else {
+                    CrabThought(emptyLine)
+                }
             }
+            .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
+        .navigationTitle("Search Sessions")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Picker("Sort", selection: $model.sort) {
@@ -58,6 +65,15 @@ struct ContentView: View {
             model.refresh()
         }
     }
+
+    /// What the crab says when there is no session to show.
+    private var emptyLine: String {
+        if model.sessionCount == 0 {
+            return model.indexing ? "Reading your sessions…" : "No sessions yet. Your Claude Code conversations will show up here."
+        }
+        if model.hits.isEmpty { return "Nothing matches that. Try fewer words, or turn on more places under Search In." }
+        return "Pick a session to see it here."
+    }
 }
 
 struct ResultsColumn: View {
@@ -70,20 +86,30 @@ struct ResultsColumn: View {
                 .padding(.top, 8)
                 .padding(.bottom, 6)
             ScrollViewReader { proxy in
-                List(model.hits, selection: $model.selection) { hit in
-                    ResultRow(hit: hit, snippet: model.snippets[hit.id])
+                // A plain list with the selection drawn in clay. The keys stay in the search field
+                // (arrows move the selection, Return resumes), so a click goes back there too.
+                List(model.hits) { hit in
+                    let selected = hit.id == model.selection
+                    ResultRow(hit: hit, snippet: model.snippets[hit.id], selected: selected)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { model.selection = hit.id; model.resume(hit.session) }
+                        .simultaneousGesture(TapGesture().onEnded {
+                            model.selection = hit.id
+                            NotificationCenter.default.post(name: .returnToSearch, object: nil)
+                        })
+                        .contextMenu {
+                            let s = hit.session
+                            Button("Resume") { model.resume(s) }.disabled(!s.canResume)
+                            Button("Copy Resume Command") { model.copyCommand(s) }.disabled(s.resumeCommand() == nil)
+                            Button("Copy Session ID") { model.copyID(s) }
+                            Divider()
+                            Button("Show Transcript in Finder") { model.reveal(s) }
+                        }
+                        .listRowBackground(SelectionBackground(selected: selected))
+                        .listRowSeparator(.hidden)
+                        .accessibilityAddTraits(selected ? .isSelected : [])
                 }
-                .contextMenu(forSelectionType: String.self) { ids in
-                    if let s = model.session(ids.first) {
-                        Button("Resume") { model.resume(s) }.disabled(!s.canResume)
-                        Button("Copy Resume Command") { model.copyCommand(s) }.disabled(s.resumeCommand() == nil)
-                        Button("Copy Session ID") { model.copyID(s) }
-                        Divider()
-                        Button("Show Transcript in Finder") { model.reveal(s) }
-                    }
-                } primaryAction: { ids in
-                    if let s = model.session(ids.first) { model.resume(s) }
-                }
+                .listStyle(.plain)
                 .onChange(of: model.selection) { _, id in
                     // Deferred: scrolling while the table is mid-update is a reentrant delegate call.
                     if let id { DispatchQueue.main.async { proxy.scrollTo(id) } }
@@ -107,9 +133,12 @@ struct ResultsColumn: View {
 struct ResultRow: View {
     let hit: Hit
     let snippet: AttributedString?
+    var selected = false
 
     var body: some View {
         let s = hit.session
+        // On the clay selection the secondary grey would fall under 4.5:1: all text is primary there.
+        let quiet: HierarchicalShapeStyle = selected ? .primary : .secondary
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(s.title)
@@ -118,7 +147,7 @@ struct ResultRow: View {
                 Spacer(minLength: 6)
                 Text(s.modified.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(quiet)
                     .fixedSize()
             }
             HStack(spacing: 4) {
@@ -133,14 +162,74 @@ struct ResultRow: View {
                     .fixedSize()
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(quiet)
             // Always two lines, so rows keep one height and the list doesn't jump as previews arrive.
             Text(snippet ?? AttributedString(" "))
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(quiet)
                 .lineLimit(2, reservesSpace: true)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 8)
+    }
+}
+
+/// The selected row: a clay tint (Brand.selection), with a clay edge under Increase Contrast.
+struct SelectionBackground: View {
+    let selected: Bool
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        if selected {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(nsColor: Brand.selection))
+                .overlay {
+                    if contrast == .increased {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.clayText, lineWidth: 1)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+        } else {
+            Color.clear
+        }
+    }
+}
+
+/// The empty states: our own crab thinking a line, in the Clawds' thought bubble. Still, so there is
+/// nothing for Reduce Motion to stop.
+struct CrabThought: View {
+    let line: String
+    init(_ line: String) { self.line = line }
+    @Environment(\.colorScheme) private var scheme
+
+    private static let crab = NSImage(cgImage: PixelCrab.image(cell: 10, body: Brand.clay, eyes: Brand.ink), size: NSSize(width: 55, height: 40))
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(line)
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 11)
+                .background(bubble(RoundedRectangle(cornerRadius: 11, style: .continuous)))
+                .frame(maxWidth: 320)
+            // The tail: two shrinking circles down toward the crab.
+            bubble(Circle()).frame(width: 9, height: 9).padding(.top, 3).offset(x: -6)
+            bubble(Circle()).frame(width: 5.5, height: 5.5).padding(.top, 2).offset(x: -10)
+            Image(nsImage: Self.crab)
+                .interpolation(.none)
+                .padding(.top, 6)
+                .accessibilityHidden(true)
+        }
+        .padding(24)
+    }
+
+    private func bubble<S: Shape>(_ shape: S) -> some View {
+        shape.fill(Color(nsColor: Brand.bubbleFill))
+            .overlay(shape.stroke(Color(nsColor: Brand.bubbleStroke), lineWidth: 0.5))
+            .shadow(color: .black.opacity(scheme == .dark ? 0.5 : 0.16), radius: 4, y: 2)
     }
 }
 
@@ -159,7 +248,6 @@ struct DetailView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationTitle(session.title)
     }
 
     private var header: some View {
@@ -175,13 +263,13 @@ struct DetailView: View {
                             Text(session.cwd.map(Paths.abbreviate) ?? "\(session.projectDir) (folder not recorded)")
                                 .textSelection(.enabled)
                             if session.folderMissing == true {
-                                Text("folder no longer exists")
+                                Text("This folder is gone")
                                     .font(.caption)
                                     .foregroundStyle(.red)
                             }
                         }
                         if session.cwdUncertain {
-                            Text("Filed under \(session.projectDir), which doesn't match this folder; resuming may not find it from here.")
+                            Text("Claude Code filed this under \(session.projectDir), so resuming from here may not find it.")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
                         } else if let first = session.recordedCwd {
@@ -239,9 +327,11 @@ struct DetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button { model.resume(session) } label: {
-                    Label("Resume", systemImage: "terminal")
+                    // Ink on clay: 5.9:1. White on clay would be 3.1:1, under WCAG AA.
+                    Label("Resume", systemImage: "terminal").foregroundStyle(Color.ink)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.clay)    // here only: on the bordered buttons it would make clay labels, too faint on grey
                 .disabled(!session.canResume)
                 .help(session.whyNotResumable ?? "Switches to its tab if it is still open, else resumes it in a new terminal tab")
                 Button { model.copyCommand(session) } label: {
@@ -329,11 +419,12 @@ struct ExcerptView: View {
         }
     }
 
+    /// You in clay, as everything of yours here; Claude in the text colour, the rest secondary.
     private var color: Color {
-        if excerpt.subagent { return .purple }
+        if excerpt.subagent { return .secondary }
         switch excerpt.kind {
-        case .prompt: return .accentColor
-        case .reply: return .orange
+        case .prompt: return .clayText
+        case .reply: return .primary
         case .toolCall: return .secondary
         }
     }
@@ -350,7 +441,7 @@ struct SearchField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSSearchField {
         let field = NSSearchField()
-        field.placeholderString = "Search conversations: words, \"exact phrase\", folder or ID"
+        field.placeholderString = "Words, \"an exact phrase\", a folder or a session ID"
         field.delegate = context.coordinator
         field.font = .systemFont(ofSize: NSFont.systemFontSize + 1)
         field.controlSize = .large
@@ -367,19 +458,24 @@ struct SearchField: NSViewRepresentable {
     final class Coordinator: NSObject, NSSearchFieldDelegate {
         var parent: SearchField
         weak var field: NSSearchField?
-        private var observer: NSObjectProtocol?
+        private var observers: [NSObjectProtocol] = []
 
         init(_ parent: SearchField) {
             self.parent = parent
             super.init()
-            observer = NotificationCenter.default.addObserver(forName: .focusSearch, object: nil, queue: .main) { [weak self] _ in
+            observers.append(NotificationCenter.default.addObserver(forName: .focusSearch, object: nil, queue: .main) { [weak self] _ in
                 guard let field = self?.field else { return }
                 field.window?.makeFirstResponder(field)
                 field.currentEditor()?.selectAll(nil)
-            }
+            })
+            observers.append(NotificationCenter.default.addObserver(forName: .returnToSearch, object: nil, queue: .main) { [weak self] _ in
+                guard let field = self?.field, field.currentEditor() == nil else { return }
+                field.window?.makeFirstResponder(field)
+                field.currentEditor()?.selectedRange = NSRange(location: field.stringValue.utf16.count, length: 0)
+            })
         }
 
-        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
 
         func controlTextDidChange(_ note: Notification) {
             guard let field = note.object as? NSSearchField else { return }

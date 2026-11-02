@@ -174,6 +174,9 @@ enum SelfTest {
         let mean = latencies.isEmpty ? 0 : latencies.reduce(0, +) / Double(latencies.count)
         check("queries stay interactive", worst < 0.5, String(format: "mean %.0fms, worst %.0fms over %d", mean * 1000, worst * 1000, latencies.count))
 
+        // Last: it switches the home folder for the whole process, and back.
+        for (name, ok) in MainActor.assumeIsolated({ demo() }) { check(name, ok) }
+
         print(failed == 0 ? "ALL PASS" : "\(failed) FAILED")
         return failed == 0 ? 0 : 1
     }
@@ -204,6 +207,45 @@ enum SelfTest {
             }
         }
         return nil
+    }
+
+    /// `--demo`, as the CLI turns it on: made-up sessions only, nothing opened outside the demo folder
+    /// (so nothing under your real ~/.claude), nothing sent when you press Resume, and all gone after.
+    @MainActor
+    private static func demo() -> [(String, Bool)] {
+        let real = Paths.realHome + "/.claude"
+        let root = Demo.activate()
+        // Both spellings of the temporary folder: /var/… and, from the loader's listings, /private/var/….
+        // (Not resolvingSymlinksInPath, which strips /private on purpose.)
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let inside = [root.path, realpath(root.path, &buf).map { String(cString: $0) } ?? root.path].map { $0 + "/" }
+        let store = SessionStore()      // the default location, as the window's
+        let sessions = store.load().sessions
+        let opened = store.opened
+        for p in opened.sorted() where !inside.contains(where: { p.hasPrefix($0) }) { print("info demo opened outside its folder: \(p)") }
+        var out: [(String, Bool)] = [
+            ("demo: the loader reads the demo's own ~/.claude/projects", inside.contains { store.root.path.hasPrefix($0) }),
+            ("demo: every folder and file the loader opened is in the demo folder (\(opened.count))",
+             !opened.isEmpty && opened.allSatisfy { p in inside.contains { p.hasPrefix($0) } }),
+            ("demo: nothing under the real ~/.claude, and no walk of the disk", !opened.contains { $0.hasPrefix(real) } && !opened.contains("/")),
+            ("demo: 12 sessions in 6 projects, all from the last two weeks",
+             sessions.count == 12 && Set(sessions.map(\.projectDir)).count == 6
+             && sessions.allSatisfy { Date().timeIntervalSince($0.modified) < 14 * 86_400 }),
+            ("demo: named by ai-title and by /rename, with a subagent and tool calls",
+             Set(sessions.map(\.titleSource)).isSuperset(of: [.aiTitle, .agentName]) && sessions.contains { $0.subagentCount > 0 }
+             && sessions.contains { $0.messages.contains { $0.kind == .toolCall } }),
+            ("demo: shown as resumable, with the default command (never your own)",
+             sessions.allSatisfy(\.canResume) && sessions.allSatisfy { $0.resumeCommand()?.contains(" && claude --resume ") == true }),
+        ]
+        let hits = SearchIndex(sessions: sessions).search(ParsedQuery("\"rate limit\""), scope: .standard, sort: .relevance) { false }?.hits ?? []
+        out.append(("demo: \"rate limit\" has several sessions to highlight (\(hits.count))", hits.count >= 4))
+        let model = AppModel(store: store)
+        if let s = sessions.first { model.resume(s) }
+        out.append(("demo: Resume sends nothing and says so", model.flash?.hasPrefix("Demo sessions") == true && !ResumeClient.shared.hasPending))
+        Demo.deactivate()
+        out.append(("demo: off again, your home back and the demo files gone",
+                    Paths.home == Paths.realHome && !FileManager.default.fileExists(atPath: root.path)))
+        return out
     }
 
     /// Links into protected folders, made in a scratch folder. Making a link never touches its target.

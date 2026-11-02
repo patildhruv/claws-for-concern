@@ -8,6 +8,14 @@ final class SessionStore: @unchecked Sendable {
     private var cache: [String: Entry] = [:]
     private var resolved: [String: String?] = [:]       // project folder name -> folder on disk
     private let resolvedLock = NSLock()
+    /// Every folder listed and file read, plus "/" once a folder had to be found by walking the disk:
+    /// the self-test checks the demo never looks outside its own folder.
+    private(set) var opened = Set<String>()
+    private let openedLock = NSLock()
+
+    private func note(_ path: String) {
+        openedLock.lock(); opened.insert(path); openedLock.unlock()
+    }
 
     struct Stamp: Equatable { let size: Int; let mtime: Double }
     private struct Entry { let stamps: [Stamp]; let session: Session? }
@@ -22,7 +30,8 @@ final class SessionStore: @unchecked Sendable {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
         func list(_ dir: URL) -> [URL] {
-            (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
+            note(dir.path)
+            return (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
         }
 
         var next = [String: Entry]()
@@ -65,6 +74,7 @@ final class SessionStore: @unchecked Sendable {
 
     func parse(_ file: URL, project: String, subagents: [URL], stamp: Stamp) -> Session? {
         var builder = SessionBuilder(id: file.deletingPathExtension().lastPathComponent)
+        ([file] + subagents).forEach { note($0.path) }
         Self.forEachRecord(in: file) { builder.add($0, subagent: false) }
         for sub in subagents { Self.forEachRecord(in: sub) { builder.add($0, subagent: true) } }
         return builder.build(file: file, project: project, size: stamp.size,
@@ -76,6 +86,7 @@ final class SessionStore: @unchecked Sendable {
         resolvedLock.lock()
         defer { resolvedLock.unlock() }
         if let known = resolved[name] { return known }
+        note("/")
         let found = ProjectDirs.resolve(name)
         resolved[name] = .some(found)
         return found

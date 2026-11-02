@@ -96,51 +96,5 @@ final class SpriteLibrary {
     }
 }
 
-/// A small pixel crab of our own, for the menu bar, the app icon and the stand-in sprite.
-enum PixelCrab {
-    static let grid = [
-        ".#########.",
-        ".#########.",
-        "##o#####o##",
-        "###########",
-        ".#########.",
-        ".#########.",
-        ".#.#...#.#.",
-        ".#.#...#.#.",
-    ]
-    static let clay = NSColor(srgbRed: 0.851, green: 0.467, blue: 0.341, alpha: 1)   // #D97757
-    static let ink = NSColor(srgbRed: 0.078, green: 0.078, blue: 0.075, alpha: 1)    // #141413
-
-    static func image(cell: Int, body: NSColor, eyes: NSColor?, blink: Bool = false) -> CGImage {
-        let w = grid[0].count * cell, h = grid.count * cell
-        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        for (r, row) in grid.enumerated() {
-            for (c, ch) in row.enumerated() where ch != "." {
-                let isEye = ch == "o"
-                if isEye && eyes == nil { continue }
-                let color = isEye && !blink ? eyes! : body
-                ctx.setFillColor(color.cgColor)
-                ctx.fill(CGRect(x: c * cell, y: (grid.count - 1 - r) * cell, width: cell, height: cell))
-            }
-        }
-        return ctx.makeImage()!
-    }
-
-    /// Template image for the menu bar: the crab with see-through eyes.
-    static func menuBarImage() -> NSImage {
-        let img = NSImage(size: NSSize(width: 22, height: 16), flipped: false) { rect in
-            let cell = rect.width / CGFloat(grid[0].count)
-            NSColor.black.setFill()
-            for (r, row) in grid.enumerated() {
-                for (c, ch) in row.enumerated() where ch == "#" {
-                    NSRect(x: CGFloat(c) * cell, y: CGFloat(grid.count - 1 - r) * cell, width: cell, height: cell).fill()
-                }
-            }
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
-}
+// `PixelCrab`, our own crab (menu bar, stand-in sprite), is in Sources/Search/Brand.swift, which the
+// search helper compiles too.

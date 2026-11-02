@@ -88,7 +88,8 @@ struct Session: Identifiable {
 
     /// `cd <folder> && <Claws for Concern's resume command>`, for the clipboard; nil unless the ID is
     /// a session ID.
-    func resumeCommand(template: String = ResumeCommand.template()) -> String? {
+    /// Under `--demo` the default template, never your own (it may hold a personal alias).
+    func resumeCommand(template: String = Demo.active ? ResumeCommand.defaultTemplate : ResumeCommand.template()) -> String? {
         guard ResumeRequest.isSessionID(id) else { return nil }
         let run = ResumeCommand.expand(template, id: Shell.quote(id))
         guard let cwd else { return run }
@@ -133,7 +134,10 @@ extension ProjectDirs {
 }
 
 enum Paths {
-    static let home = NSHomeDirectory()
+    static let realHome = NSHomeDirectory()
+    /// Your home folder, or the made-up one under `--demo`. The loader's ~/.claude/projects, the folder
+    /// checks and `~` in what is shown all follow it.
+    static var home = realHome
 
     static func abbreviate(_ path: String) -> String {
         if path == home { return "~" }
@@ -142,12 +146,15 @@ enum Paths {
     }
 
     /// Folders where even a stat makes macOS ask for permission on behalf of this app (other apps'
-    /// containers ask too), also under the data volume's firmlinked path.
-    static let protectedRoots: [String] = {
-        let mine = ["Desktop", "Documents", "Downloads", "Library/Mobile Documents", "Library/CloudStorage",
-                    "Library/Containers", "Library/Group Containers"].map { home + "/" + $0 }
+    /// containers ask too), also under the data volume's firmlinked path. Your real home's stay
+    /// protected under `--demo`.
+    static var protectedRoots: [String] {
+        let mine = Set([realHome, home]).flatMap { h in
+            ["Desktop", "Documents", "Downloads", "Library/Mobile Documents", "Library/CloudStorage",
+             "Library/Containers", "Library/Group Containers"].map { h + "/" + $0 }
+        }
         return mine + mine.map { "/System/Volumes/Data" + $0 } + ["/Volumes"]
-    }()
+    }
 
     /// True for a path in a protected folder, also when a symbolic link along it leads into one. Each
     /// prefix is looked at with lstat and destinationOfSymbolicLink, which never follow a link, and
