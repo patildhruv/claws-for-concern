@@ -6,6 +6,7 @@
 
 <p align="center">
   <b>Tiny Clawds in the corner of your screen whenever a Claude Code session needs you.</b><br>
+  Search every conversation you have had, and get them all back when your terminal restarts.<br>
   A native macOS menu bar app. No Electron, no API key, nothing to configure.
 </p>
 
@@ -27,6 +28,9 @@ ago, one died on a rate limit, and you are busy in a seventh tab.
 Claws for Concern puts a small animated Clawd in the corner of your screen for each session that
 needs you. **Hover** for a one-line recap of where it stopped. **Click** to jump straight to its tab.
 **Look at the tab** and the Clawd quietly leaves.
+
+It also finds any past session by what was said in it, and when Ghostty quits and reopens its tabs,
+it brings back the conversations that were running in them.
 
 ## What you see
 
@@ -75,6 +79,45 @@ corners and the Dock's strip; only the menu bar is kept clear (or switch on *Kee
 - **Crowded?** Past a limit you set, extra sessions wait behind a small **+N** chip.
 - **Need quiet?** Menu bar crab → Pause Clawds, for 15 minutes up to tomorrow morning.
 
+## Find any session
+
+Menu bar crab → **Search Sessions…** searches every Claude Code conversation on your Mac: your prompts,
+Claude's replies, tool calls and subagents, plus each session's name, folder and ID.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/search-dark.png">
+  <img src="docs/media/search-light.png" alt="The Search Sessions window: the query &quot;rate limit&quot; with five matching sessions on the left, highlighted in clay; on the right the selected session's folder, ID, branch and dates, a Resume button, its resume command, and the two messages that matched">
+</picture>
+
+- **Type words, a `"quoted phrase"`, a folder or an ID.** Words forgive a typo or an unfinished word;
+  quotes match exactly. Sort by relevance or by most recent.
+- **Return resumes** the selected session in a new tab, in the folder it was started in, with your
+  resume command (Settings → General). If it is still running, you are taken to its tab instead.
+- **Copy Command**, **Copy ID** and **Show Transcript** for everything else.
+- **Light on your Mac.** Search is a small app of its own inside Claws for Concern. It builds its index
+  when you open it (a few seconds for hundreds of sessions) and quits when you close the window, so the
+  memory it needs is never held by the always-running app.
+
+## Pick up where Ghostty left off
+
+Quit Ghostty, or restart your Mac, and every Claude Code session in it ends. When Ghostty reopens its
+tabs, Claws for Concern offers to resume each conversation in the tab it was running in:
+
+> Ghostty reopened 4 tabs that were running Claude Code. Resume them?
+
+Choose **Resume** (or tick *Always resume without asking*) and your resume command is typed into each
+tab. It is careful about where and when:
+
+- Only into a tab Ghostty has **just reopened**, sitting idle at your shell, in that session's folder.
+- Never into a tab you are typing in: it waits until you pause.
+- Never for a session you ended yourself (`/exit`, Ctrl-C) or a tab you closed. Only sessions that
+  ended because Ghostty quit, crashed or the Mac restarted come back.
+- Once per relaunch. Not now means not now.
+
+Restore needs Ghostty 1.4 or later with `window-save-state = always` in its config, so that Ghostty
+brings its tabs back. Settings → General → Restore says if yours does not. Other terminals can add
+restore through the same adapter that finds their panes ([docs/adapters.md](docs/adapters.md)).
+
 ## Works with your terminal
 
 Clawds and recaps work everywhere Claude Code runs. These terminals also get pane-level support:
@@ -82,7 +125,7 @@ finding a session's tab or pane, clearing its Clawd when you look at it, and jum
 
 | Terminal | How it knows the pane | When a Clawd clears |
 | --- | --- | --- |
-| **Ghostty** | learns the tab you type each prompt into, then matches by folder and title | the tab is in front and you are active |
+| **Ghostty** | the tab's tty (Ghostty 1.4+); on 1.3, learns the tab you type each prompt into | the tab is in front and you are active |
 | **cmux** | the surface ID cmux gives every shell | the surface is focused and you are active |
 | **herdr** | the pane ID herdr gives every shell | herdr marks the agent seen (it is visible in a herdr client) |
 | **tmux** | `TMUX_PANE` | the pane is active in a tmux client whose window is in front |
@@ -136,15 +179,24 @@ flowchart TB
     S -- "file watcher" --> A["Claws for Concern.app"]
     A <-- "terminal adapters" --> G["Ghostty · cmux · herdr · tmux · iTerm2 · Terminal"]
     A -- "claude -p --model haiku" --> R["one-line recap"]
+    A -- "opens on demand" --> SR["Claws Search (its own process)"]
+    SR -- "reads" --> T[("~/.claude/projects transcripts")]
 ```
 
 - **Hooks**: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (for `AskUserQuestion` and `ExitPlanMode`),
   `PermissionRequest`, `Notification` (permission and input prompts), `PostToolUse`, `PostToolUseFailure`,
   `Stop`, `StopFailure` and `SessionEnd`. All but `SessionEnd` run asynchronously, so Claude never waits.
 - **Which pane is which**: the hook records the terminal's own IDs for the session (`TMUX_PANE`, the
-  cmux surface, the herdr pane, the tty) from an allow-list, never anything secret. Ghostty has no such
-  ID, so the app remembers the tab you were typing in when you sent each prompt, and otherwise matches
-  the folder and the session title Claude Code shows in the tab.
+  cmux surface, the herdr pane, the tty) from an allow-list, never anything secret. Ghostty 1.4 reports
+  each tab's tty, so a session maps to its tab exactly; on Ghostty 1.3 the app remembers the tab you were
+  typing in when you sent each prompt, and otherwise matches the folder and the tab's title.
+- **Restore**: when a session ends, the hook records why. A session that ended because its terminal
+  went away (Claude Code reports `other`) is remembered with its tab for 7 days; `/exit` and Ctrl-C
+  (`prompt_input_exit`), `/clear` and logging out are forgotten. When Ghostty relaunches, the remembered
+  tabs that came back idle in the right folder get the resume command.
+- **Search** runs as a separate helper app. It asks Claws to resume a session with a one-time key Claws
+  gave it at launch, and only while its window is in front; Claws checks the session's folder against
+  Claude Code's own record before typing anything.
 - **Recaps**: `claude -p --model haiku` through the Claude Code install and login already on your Mac,
   so there is no API key. About 650 input and 25 output tokens per recap, three seconds, no tools, no MCP
   servers, nothing saved to your session history, and your own settings and hooks are not loaded.
@@ -159,6 +211,10 @@ Code request does. Turn recaps off in Settings → Recaps and the bubble shows t
 The app reads only what the hooks record, plus the title records in each session's transcript. It never
 reads your code or your terminal. Its files live in `~/Library/Application Support/Claws for Concern/`.
 
+Search reads your transcripts in `~/.claude/projects` on your Mac, only while its window is open, and
+sends nothing anywhere. It never looks inside Documents, Desktop, Downloads, iCloud or other protected
+folders, so macOS never asks you about them on its behalf.
+
 ## Settings
 
 Menu bar crab → **Settings…** (⌘,), or open the app again from Applications. While Settings is open the
@@ -172,7 +228,7 @@ app gets a Dock icon and a menu bar, like any Mac app, and drops them when you c
 
 | Tab | What you can change |
 | --- | --- |
-| **General** | Open at login · menu bar crab and its count · what a click does · the global shortcut (record your own) · the resume command · Preview |
+| **General** | Open at login · menu bar crab and its count · what a click does · the global shortcut (record your own) · the resume command · Restore: offer to resume sessions when Ghostty reopens their tabs, or resume them without asking · Preview |
 | **Clawds** | Which situations get a Clawd (questions, permissions, plans, MCP input, errors, finished) · forget unseen finished ones after 1–24 h · clear on look, and after how long · how many before the +N chip · a sound (any system sound) · macOS notifications, which wait for the recap and click through to the session |
 | **Appearance** | Small, Medium or Large (always whole device pixels, so the art stays crisp) · animate · soft shadow · badges · opacity · which animation means "needs you" and "error" · which ones finished sessions pick from, with live previews · the bubble: on or off, hover delay, 11–13 pt text, 1–4 lines, which details to show, with a live preview |
 | **Position** | The display (the one you are using, the main one, or a particular one) · the default corner · snapping · keep clear of the Dock · lock · distance from the edge · spacing · reset every display |
@@ -188,6 +244,7 @@ app has a small command line (`ClawsForConcern --help`).
 - macOS 14 Sonoma or later
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) (the native installer or Homebrew)
 - Any terminal. Pane-level support in Ghostty 1.3+, cmux, herdr, tmux, iTerm2 and Terminal (see above).
+- Restore: Ghostty 1.4+ with `window-save-state = always`.
 
 ## Uninstall
 
@@ -210,6 +267,12 @@ defaults delete io.github.patildhruv.claws-for-concern
 - **Recaps never arrive.** Run
   `"/Applications/Claws for Concern.app/Contents/MacOS/ClawsForConcern" --recap "test"`: it uses the same
   code path and prints the error. Settings → Recaps → Try it does the same.
+- **Restore did not offer to resume.** Settings → General → Restore must be on, and Ghostty must reopen
+  its tabs (`window-save-state = always`; Settings warns if not). A tab is skipped if it reopened in
+  another folder or was not idle. `ClawsForConcern --restore-status` lists each remembered session and
+  why it would or would not be resumed.
+- **Search says a session cannot be resumed.** Its folder no longer exists, or Claude Code never recorded
+  it. Copy Command still gives you the command to run yourself.
 - **The shortcut does nothing.** Another app has it; the log (Settings → Advanced → Log) says so. Record a
   different one in Settings → General.
 
@@ -221,7 +284,7 @@ B="build/Claws for Concern.app/Contents/MacOS/ClawsForConcern"
 "$B" --selftest                         # unit checks; prints ALL PASS
 "$B" --terminals                        # what the terminal adapters see, per session
 "$B" --help                             # the other commands
-tools/make-readme-media.sh              # re-render the images in this README
+tools/make-readme-media.sh              # re-render the images in this README (Search uses demo data)
 ```
 
 Plain `swiftc`, no Xcode project and no dependencies. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules,
