@@ -2,15 +2,50 @@
 
 Find any past Claude Code conversation by what was said in it, and resume it. Search is a separate
 app inside the bundle, `Claws for Concern.app/Contents/Helpers/Claws Search.app` (SwiftUI, sources in
-`Sources/Search/`), opened from the crab menu's **Search Sessions…**.
+`Sources/Search/`), opened from the crab menu's **Search Sessions…**. It began as a standalone app,
+Session Search, and joined Claws for Concern in 1.3.
 
 - **Its own process.** The index lives only while the window is open: the helper quits when its
   window closes (and quits by itself if no window came up within 3 s of launch). A crash there never
   takes the Clawds down.
-- **A regular app while open**: Dock icon, ⌘W, ⌘Q, Edit menu. The menu bar app stays `LSUIElement`.
+- **A regular app while open**: "Claws Search" in the Dock, the app menu and ⌘-Tab; the window is
+  titled **Search Sessions**, like the menu item. ⌘W, ⌘Q, Edit menu, ⌘F to the search field. The About
+  box says "Claws Search", "Part of Claws for Concern <version>" and links the repository. The menu
+  bar app stays `LSUIElement`.
 - **Bundle ID** `io.github.patildhruv.claws-for-concern.search`; build.sh copies the app's version into
   its Info.plist and signs it before the app (inside out). Its own preferences (Search In, Sort) live
   in that domain; it writes nothing else, and only reads Claws' `resumeCommand`.
+
+## Look
+
+Part of Claws for Concern, native and quiet: system fonts and controls, the brand only where it
+carries meaning. `Sources/Search/Brand.swift` (compiled into both binaries) holds our own pixel crab
+(`PixelCrab`, moved there from Sprites.swift), clay `#D97757` and ink `#141413`, and the Clawds'
+thought-bubble fill and stroke, which Bubble.swift now reads from it too.
+
+- **Clay marks what is yours or chosen**: the selected row, the Resume button, the "You" label, and
+  matched words. Everything else uses the system's colours.
+- **A split view, not a sidebar.** The results are content, like Mail's message list. In a
+  translucent sidebar the text sits over whatever is behind the window, so no contrast can be
+  promised; the list pane is opaque. The selection is drawn by the row (`SelectionBackground`), so it
+  can be clay; the keys stay in the search field (arrows move the selection, Return resumes), and a
+  click in the list returns focus there.
+- **Empty states** (reading, no sessions yet, nothing matches): the crab thinking one line in the
+  Clawds' thought bubble (`CrabThought`). Nothing moves, so there is nothing for Reduce Motion to stop.
+- **Contrast** (WCAG 2.x, computed; backgrounds white, `#F5F5F5`, `#F0F0F0` light; `#1E1E1E`,
+  `#262626`, `#2C2C2C` dark). Clay itself is 2.74:1 on white and 4.47:1 on dark grey, and white on clay
+  is 3.12:1, all under AA for text, so:
+
+| Use | Light | Dark | Increase Contrast (light / dark) |
+| --- | --- | --- | --- |
+| Text in clay ("You") | `#A34E30`, 4.99:1 | `#E08A6C`, 5.33:1 | `#7A3820` 7.63:1 / `#EDAE97` 7.38:1 |
+| Resume label on clay | ink, 5.90:1 | ink, 5.90:1 | same |
+| Selected row (body text on it) | `#F9E9E4`, 15.6:1 | `#4F352D`, 11.2:1 | `#F2D1C6` / `#784939`, plus a clay edge (6.1:1 / 4.0:1 against the fill) |
+| Match highlight (text on it) | `#F2D1C6`, 12.9:1 | `#784939`, 7.5:1 | `#EAB9A7` 10.5:1 / `#784939` 7.5:1 |
+
+  In the selected row all text is primary: the secondary grey would fall under 4.5:1 on the tint.
+  The Resume button is the only control tinted clay; on bordered buttons the tint colours the labels,
+  too faint on grey.
 
 ## Resuming a session
 
@@ -95,8 +130,8 @@ apps' preferences; that was not tested here.
 
 ## How it reads Claude Code's files
 
-Verified by the original Session Search against the Claude Code 2.1.289 binary (2026-10-05). On
-2026-11-02 (2.1.316) the self-test still resolves 543 of 545 sessions to their project folder.
+Verified against the Claude Code 2.1.289 binary (2026-10-05), before Search joined Claws for Concern.
+On 2026-11-02 (2.1.316) the self-test still resolves 543 of 545 sessions to their project folder.
 
 - Transcripts: `~/.claude/projects/<encoded folder>/<session id>.jsonl`; subagents in
   `<session id>/subagents/*.jsonl`. Folder encoding: `path.replace(/[^a-zA-Z0-9]/g, "-")`, cut at
@@ -143,8 +178,24 @@ Verified by the original Session Search against the Claude Code 2.1.289 binary (
   gap between the two, not traced.
 - `NSTableView … reentrant operation` once at launch comes from SwiftUI's own List diffing
   (`OutlineListCoordinator.diffRows`, confirmed by backtrace in the original), not from our code.
-- **`--snapshot` renders offscreen**, so it never shows a window or takes focus. The selected row and
-  the selected segment of the Sort control draw as solid black there; the real window is unaffected.
+- **`--snapshot` renders offscreen** (`cacheDisplay`), so it never shows a window or takes focus. That
+  draws layers without the window server's filters, and what it did to each part:
+  - A translucent sidebar's vibrant text has colours meant for a `vibrantColorMatrix` filter (+0.3 per
+    channel in dark mode): dark grey on dark grey offscreen. Gone with the split view, as is the vibrant
+    selection, which drew solid black.
+  - The Sort control's selected segment sits on a `destOut` cut-out that drew as a black block: the
+    snapshot hides layers composited `destOut`, which leaves the segment's own pill.
+  - A window that is never shown draws its inactive look. The snapshot's window says it is key (the
+    search field shows its cursor) and its controls get `controlActiveState = .key` (Resume in clay,
+    not grey). The traffic lights stay grey: they ask the app, which is never active there.
+  - Tried and dropped: baking the filter's matrix into each layer (light mode came out wrong), and
+    `CARenderer` (it rendered a blank frame).
+- **Demo mode must not reach your data.** `--demo` writes made-up sessions to a temporary folder and
+  points `Paths.home` there; the loader, the folder checks and `~` all follow it. It uses the default
+  resume command (yours may hold a personal alias) and resumes nothing. The self-test asserts every
+  path the loader opened is inside the demo folder, compared both as `/var/…` and `/private/var/…`
+  (`realpath`; `resolvingSymlinksInPath` strips `/private` on purpose). A demo killed before it tidied
+  up leaves its folder; the next one removes folders whose process is gone.
 
 ## Measured (2026-11-02, Apple silicon, macOS 27.0.1, 545 sessions, 2.7 GB of transcripts)
 
@@ -164,8 +215,15 @@ H="build/Claws for Concern.app/Contents/Helpers/Claws Search.app/Contents/MacOS/
 $H --selftest                # unit checks + searches picked from your own transcripts (ALL PASS)
 $H --search "words" [--limit N] [--recent] [--scope prompts,replies,tools,subagents]
 $H --resume <id prefix>      # a resume request from the terminal: Claws must refuse it (see below)
-$H --snapshot out.png [--query q]
+$H --snapshot out.png [--query q] [--appearance light|dark]   # offscreen, first hit selected
+$H --demo …                  # any of the above (and the window) on 12 made-up sessions, not yours
 ```
+
+The README's pictures, `docs/media/search-light.png` and `search-dark.png`, come from
+`tools/make-readme-media.sh`: `--demo --snapshot … --query '"rate limit"'` in each appearance. The demo
+is 12 sessions in six made-up projects (`~/code/payments-api`, `~/code/ios-app`, `~/code/web-dashboard`,
+`~/code/data-pipeline`, `~/notes/blog`, `~/infra/terraform`) over the last two weeks, written by
+`Demo.swift` from code: no data files.
 
 `ClawsForConcern --selftest` runs the helper's self-test as a subprocess and reports it. `--resume`
 sends the Resume button's request with a nonce Claws never issued, from a terminal rather than the

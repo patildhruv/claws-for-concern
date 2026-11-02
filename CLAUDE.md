@@ -35,7 +35,7 @@ $B --snapshot-settings DIR  # every Settings pane, offscreen (switches render "o
 ```
 
 Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-parse-as-library`,
-`Sources/Shared` + `Sources/App/**` + `Sources/Search/ResumeRequest.swift`), the hook (`Sources/Shared` +
+`Sources/Shared` + `Sources/App/**` + `Sources/Search/{ResumeRequest,Brand}.swift`), the hook (`Sources/Shared` +
 `Sources/Hook`, Foundation only) and the search helper (`-parse-as-library`, `Sources/Search/*.swift`).
 
 ## Non-negotiables
@@ -223,9 +223,18 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
 - **The helper must never stat or list inside ~/Documents, ~/Desktop, ~/Downloads, iCloud, cloud
   storage, other apps' containers or /Volumes**, through a symlink either (privacy prompt):
   `Paths.isPrivacyProtected` reads links with `lstat`, never following them. Reading `~/.claude` is fine.
+- **Looks like Claws** (docs/search.md "Look"): "Claws Search", window "Search Sessions"; clay only for
+  the selection, Resume, "You" and matches, in shades that meet WCAG AA (AAA with Increase Contrast);
+  empty states are our crab in the Clawds' bubble. `Sources/Search/Brand.swift` (both binaries) holds
+  `PixelCrab`, the colours and the bubble style. A split view, not a sidebar: a translucent sidebar's
+  vibrant text has no contrast we can promise, and renders wrong offscreen.
+- **`--demo` never reads your ~/.claude**: made-up sessions in a temporary home (`Paths.home`), the
+  default resume command, nothing resumed; the self-test asserts on every path the loader opens. The
+  README images (`docs/media/search-*.png`) are `--demo --snapshot`, via tools/make-readme-media.sh.
 - Commands (`H=".../Contents/Helpers/Claws Search.app/Contents/MacOS/ClawsSearch"`): `$H --selftest`,
   `$H --search "words" [--limit N] [--recent] [--scope …]`, `$H --resume <id prefix>` (a request from
-  the terminal, which Claws must refuse), `$H --snapshot out.png [--query q]` (offscreen, takes no focus).
+  the terminal, which Claws must refuse), `$H --snapshot out.png [--query q] [--appearance light|dark]`
+  (offscreen, takes no focus), and `--demo` with any of them.
 
 ## Settings, placement, the Dock
 
