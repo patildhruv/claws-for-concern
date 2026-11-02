@@ -8,6 +8,12 @@ enum HookEvent {
     /// Background task types that will wake the session up again on their own.
     static let wakingTaskTypes: Set<String> = ["subagent", "workflow", "teammate", "cloud session"]
 
+    /// SessionEnd reasons that mean you ended the conversation yourself: `/exit` or Ctrl-D
+    /// (`prompt_input_exit`), `/clear`, `/resume` into another one, `/logout`. Its state is deleted.
+    /// Anything else (`other`: the terminal quit or the tab closed) keeps it, marked ended, so the
+    /// app can offer to resume it when the terminal reopens the tab.
+    static let deliberateEnds: Set<String> = ["prompt_input_exit", "clear", "resume", "logout"]
+
     /// `pid`/`pidStart`: the Claude process that ran this hook. `processCwd`: its working directory.
     /// `isAlive` is injectable for the self-test.
     static func apply(_ input: [String: Any], to state: inout SessionState?, now: Double,
@@ -27,7 +33,21 @@ enum HookEvent {
             takeover = true  // the old process is gone: a resume in a new process
         }
 
-        if event == "SessionEnd" { return state == nil ? .ignore : .delete }
+        if event == "SessionEnd" {
+            guard var s = state else { return .ignore }
+            let reason = input["reason"] as? String ?? ""
+            if deliberateEnds.contains(reason) { return .delete }
+            if s.endedTs != nil { return .ignore }
+            s.endReason = reason.isEmpty ? "unknown" : reason
+            s.endedTs = now
+            s.updatedTs = max(s.updatedTs, now)
+            state = s
+            return .write
+        }
+        // Once ended, only a new start brings the session back: a resume in a new process, or
+        // `/resume` back into it from the same one. A late async event from the process that
+        // ended it must not.
+        if state?.endedTs != nil, !takeover, event != "SessionStart" { return .ignore }
 
         let root = processCwd ?? cwd
         var s = state ?? SessionState(sessionId: sid, cwd: root)
@@ -35,6 +55,8 @@ enum HookEvent {
         if state != nil, now < s.updatedTs { return .ignore }
         if takeover { s.rootCwd = root }
         let before = s
+        s.endReason = nil
+        s.endedTs = nil
 
         func set(_ status: SessionStatus) {
             if s.status != status { s.statusTs = now }

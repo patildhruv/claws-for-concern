@@ -47,8 +47,12 @@ final class Tracker {
     private var demoUntil = Date.distantPast
     private let terminals = Terminals.shared
     private let sprites = SpriteLibrary.shared
+    private let restorer = Restorer.shared
+    /// The CLI's `--watch`: tracking and restore only, no recaps, sounds, notifications or prompts.
+    private let headless: Bool
 
-    init() {
+    init(headless: Bool = false) {
+        self.headless = headless
         if let d = try? Data(contentsOf: Paths.appState), let s = try? JSONDecoder().decode(Saved.self, from: d) {
             saved = s
         }
@@ -86,12 +90,21 @@ final class Tracker {
 
     func reload() {
         var fresh: [String: SessionState] = [:]
+        var ended: [SessionState] = []
         let files = (try? FileManager.default.contentsOfDirectory(at: Paths.sessions, includingPropertiesForKeys: nil)) ?? []
         for f in files where f.pathExtension == "json" {
-            if let s = SessionState.load(f) { fresh[s.sessionId] = s }
+            guard let s = SessionState.load(f) else { continue }
+            if s.endedTs != nil { ended.append(s) } else { fresh[s.sessionId] = s }
         }
+        // While their pane is still known (it lives in `saved.meta`, pruned just below).
+        let pending = retire(ended)
         states = fresh
-        for sid in saved.meta.keys where fresh[sid] == nil { saved.meta[sid] = nil }
+        for sid in saved.meta.keys where fresh[sid] == nil && !pending.contains(sid) { saved.meta[sid] = nil }
+        notePanes()
+        restorer.live(fresh.values.map { s in
+            let (a, pane) = location(s)
+            return (s.sessionId, a.id, pane)
+        })
 
         let now = Date().timeIntervalSince1970
         var capture: [String] = []
@@ -220,7 +233,7 @@ final class Tracker {
             source = "Claude's final message for this turn:\n\n\(msg)"
             fallback = Summarizer.fallback(msg)
         }
-        guard Settings.recaps else { return (source, fallback, false) }
+        guard Settings.recaps, !headless else { return (source, fallback, false) }
         let key = Summarizer.key(source)
         if let r = saved.recaps[key] { return (source, r.text, false) }
         if let failed = recapFailures[key], Date().timeIntervalSince(failed) < 120 { return (source, fallback, false) }
@@ -297,7 +310,37 @@ final class Tracker {
 
     /// Does pane `t` host session `s`? `strong`: you were typing in `t` a moment ago.
     private func matches(_ t: PaneInfo, _ s: SessionState, strong: Bool = false) -> Bool {
-        TabMatch.matches(t, rootCwd: s.rootCwd, cwd: s.cwd, title: s.title ?? transcriptTitle(s), strong: strong)
+        // Ghostty 1.4 names each tab's tty. A tab on the session's tty is its tab; a tab another
+        // session owns by tty is not. Sessions on no tab's tty (claude inside an editor's
+        // terminal) are left to learning, as on Ghostty 1.3.
+        if let tty = t.tty, tty == s.tty { return true }
+        if states.values.contains(where: { $0.sessionId != s.sessionId && terminals.adapter(for: $0).paneID(for: $0) == t.id }) {
+            return false
+        }
+        return TabMatch.matches(t, rootCwd: s.rootCwd, cwd: s.cwd, title: s.title ?? transcriptTitle(s), strong: strong)
+    }
+
+    /// A pane the adapter names outright (Ghostty's tty) is stored like a learned one, so it is still
+    /// known after the app restarts, which is when a restore after a reboot needs it.
+    private func notePanes() {
+        for (sid, s) in states {
+            let a = terminals.adapter(for: s)
+            guard a.learnsPanes, let p = a.paneID(for: s), saved.meta[sid]?.terminalId != p else { continue }
+            assign(p, to: sid)
+        }
+    }
+
+    /// When each learning adapter last listed its panes (epoch seconds).
+    private var listedAt: [String: Double] = [:]
+
+    /// A restore needs every session's pane, not only those with a Clawd: one listing for each
+    /// session that started since its terminal's panes were last listed and has no pane yet.
+    private func mapNewSessions() {
+        let new = states.values.filter { s in
+            let (a, pane) = location(s)
+            return pane == nil && a.learnsPanes && a.restoresPanes && (s.claudeStart ?? 0) > (listedAt[a.id] ?? 0)
+        }
+        if !new.isEmpty { fallbackMap(only: new, learn: false) }
     }
 
     private func assign(_ terminalId: String, to sid: String) {
@@ -314,13 +357,14 @@ final class Tracker {
     private func captureFocusedTab(for sid: String, maxIdle: Double) {
         guard let s = states[sid], Presence.idleSeconds < maxIdle else { return }
         let a = terminals.adapter(for: s)
-        guard a.learnsPanes, let t = terminals.focusedPane(a.id), matches(t, s, strong: true) else { return }
+        guard a.learnsPanes, a.paneID(for: s) == nil, let t = terminals.focusedPane(a.id), matches(t, s, strong: true) else { return }
         assign(t.id, to: sid)
     }
 
     /// Learning adapters, for sessions that alert before we ever saw you type into them (for example,
-    /// already running when the app started): match panes by folder and title.
-    private func fallbackMap(force: Bool = false, only: [SessionState]? = nil, then: (() -> Void)? = nil) {
+    /// already running when the app started): list the panes, which on Ghostty 1.4 names each
+    /// session's tab by tty, else match by folder and title (`learn`).
+    private func fallbackMap(force: Bool = false, only: [SessionState]? = nil, learn: Bool = true, then: (() -> Void)? = nil) {
         let unmapped = (only ?? alerts.filter { !$0.mapped }.compactMap { states[$0.sessionId] })
             .filter { terminals.adapter(for: $0).learnsPanes }
         guard !unmapped.isEmpty, force || Date().timeIntervalSince(lastFallbackMap) > 5 else { then?(); return }
@@ -329,12 +373,15 @@ final class Tracker {
         var changed = false
         for (aid, sessions) in Dictionary(grouping: unmapped, by: { terminals.adapter(for: $0).id }) {
             guard let a = terminals.adapter(id: aid) else { continue }
+            listedAt[aid] = Date().timeIntervalSince1970
             group.enter()
             terminals.panes(a) { [weak self] panes in
                 defer { group.leave() }
                 guard let self, !panes.isEmpty else { return }
+                if sessions.contains(where: { a.paneID(for: $0) != nil }) { changed = true }
+                guard learn else { return }
                 let taken = Set(self.saved.meta.values.compactMap(\.terminalId))
-                for s in sessions where self.saved.meta[s.sessionId]?.terminalId == nil {
+                for s in sessions where self.location(s).pane == nil {
                     let free = panes.filter { !taken.contains($0.id) }
                     // Unique match wins: by title among Claude tabs anywhere, else the one Claude tab in
                     // the session's folder.
@@ -348,7 +395,7 @@ final class Tracker {
             }
         }
         group.notify(queue: .main) { [weak self] in
-            if changed { self?.rebuild(); self?.save() }
+            if changed { self?.notePanes(); self?.rebuild(); self?.save() }
             then?()
         }
     }
@@ -366,7 +413,8 @@ final class Tracker {
     static let tickInterval = 0.5
     /// Seconds each alerting session's tab has been in front while you were active.
     private var dwell: [String: Double] = [:]
-    private var lastReap = Date(), lastReload = Date(), lastExpiry = Date()
+    /// The first tick reaps at once: sessions that died with the Mac reach the restore ledger early.
+    private var lastReap = Date.distantPast, lastReload = Date(), lastExpiry = Date()
 
     private func tick() {
         let now = Date()
@@ -374,6 +422,7 @@ final class Tracker {
         if now.timeIntervalSince(lastReap) > 10 { lastReap = now; reapDeadSessions() }
         if !pendingNotify.isEmpty { flushNotifications(alerts) }
         if now.timeIntervalSince(lastReload) > 10 { lastReload = now; reload() }  // in case an fs event was missed
+        mapNewSessions()
         let real = alerts.filter { states[$0.sessionId] != nil }
         guard !real.isEmpty else { dwell.removeAll(); return }
         if now.timeIntervalSince(lastExpiry) > 30 { lastExpiry = now; rebuild() }
@@ -408,7 +457,7 @@ final class Tracker {
     private var askedPermission = Set<String>()
 
     private func askPermissionInContext(_ adapterIDs: Set<String>) {
-        for id in adapterIDs where !askedPermission.contains(id) {
+        for id in adapterIDs where !askedPermission.contains(id) && !headless {
             guard let a = terminals.adapter(id: id), let b = a.scriptedBundleID,
                   !NSRunningApplication.runningApplications(withBundleIdentifier: b).isEmpty else { continue }
             askedPermission.insert(id)
@@ -425,7 +474,7 @@ final class Tracker {
         let keys = Set(list.filter { states[$0.sessionId] != nil }.map { "\($0.sessionId)@\($0.ts)" })
         defer { announced = keys; primed = true }
         // Nothing on launch for Clawds that were already there, nothing while paused.
-        guard primed, Settings.pausedUntil == nil else { return }
+        guard primed, !headless, Settings.pausedUntil == nil else { return }
         let fresh = list.filter { states[$0.sessionId] != nil && !announced.contains("\($0.sessionId)@\($0.ts)") }
         guard !fresh.isEmpty else { return }
         if Settings.sound { NSSound(named: NSSound.Name(Settings.soundName))?.play() }
@@ -447,14 +496,52 @@ final class Tracker {
         }
     }
 
-    /// Sessions whose Claude process is gone (tab closed, crash) never send SessionEnd.
+    /// Sessions whose Claude process is gone without SessionEnd (a crash, a restart, a terminal
+    /// killed outright) count as killed with their tab.
     private func reapDeadSessions() {
         let now = Date().timeIntervalSince1970
+        var vanished: [SessionState] = []
         for (sid, s) in states {
-            let dead: Bool
-            if let pid = s.claudePid { dead = !ProcInfo.isAlive(pid: pid, start: s.claudeStart) } else { dead = now - s.updatedTs > 48 * 3600 }
-            if dead { try? FileManager.default.removeItem(at: Paths.sessions.appendingPathComponent("\(sid).json")) }
+            if let pid = s.claudePid {
+                if !ProcInfo.isAlive(pid: pid, start: s.claudeStart) { vanished.append(s) }
+            } else if now - s.updatedTs > 48 * 3600 {
+                try? FileManager.default.removeItem(at: Paths.sessions.appendingPathComponent("\(sid).json"))
+            }
         }
+        _ = retire(vanished)
+    }
+
+    /// For the restore, before it plans: no waiting for the next 10-second reap.
+    func reapNow() { reapDeadSessions() }
+
+    /// Sessions that ended without you closing them: their files go, and the restore ledger keeps
+    /// the ones whose terminal can reopen their tab. Returns the IDs left for the next reload (the
+    /// hook held its lock, or just brought the session back).
+    private func retire(_ gone: [SessionState]) -> Set<String> {
+        var keep: [RestoreEntry] = []
+        var pending = Set<String>()
+        for s in gone {
+            let (a, pane) = location(s)
+            guard Tracker.removeSessionFile(s) else { pending.insert(s.sessionId); continue }
+            guard a.restoresPanes, let pane else { continue }
+            keep.append(RestoreEntry(sessionId: s.sessionId, adapter: a.id, pane: pane, folder: s.rootCwd, title: title(for: s),
+                                     endedTs: s.endedTs ?? s.updatedTs, reason: s.endReason ?? "vanished"))
+        }
+        restorer.remember(keep)
+        return pending
+    }
+
+    /// Deletes a session file the hook wrote, unless the hook rewrote it since `s` was read: a resume
+    /// can bring a session back at any moment. Never waits for the hook's lock.
+    static func removeSessionFile(_ s: SessionState) -> Bool {
+        let url = Paths.sessions.appendingPathComponent("\(s.sessionId).json")
+        let fd = Darwin.open(Paths.sessions.appendingPathComponent(".lock").path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { return false }
+        defer { flock(fd, LOCK_UN) }
+        guard SessionState.load(url) == s else { return false }
+        return (try? FileManager.default.removeItem(at: url)) != nil
     }
 
     // MARK: Actions
@@ -534,6 +621,14 @@ final class Tracker {
         var out: [String: Int] = [:]
         for s in states.values { out[terminals.adapter(for: s).id, default: 0] += 1 }
         return out
+    }
+
+    /// Each live session's adapter and pane, for `--watch`.
+    func sessionPanes() -> [(String, String, String?)] {
+        states.values.map { s in
+            let (a, pane) = location(s)
+            return (s.sessionId, a.id, pane)
+        }
     }
 
     var mappedCount: Int { alerts.filter { $0.mapped && states[$0.sessionId] != nil }.count }

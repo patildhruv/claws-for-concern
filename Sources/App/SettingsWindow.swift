@@ -73,6 +73,8 @@ final class LiveStatus: ObservableObject {
     @Published var sessions = 0
     @Published var mapped = 0
     @Published var unmapped = 0
+    /// Why a terminal will not reopen its tabs for Restore (Ghostty's window-save-state), if it will not.
+    @Published var restoreProblems: [String] = []
     private var timer: Timer?
     private var ticks = 0
 
@@ -91,8 +93,14 @@ final class LiveStatus: ObservableObject {
 
     func refresh() {
         hooks = HooksInstaller.status()
-        // Adapter health runs tools (cmux socket-status…): every third refresh is plenty.
-        if ticks % 3 == 0 { Terminals.shared.refreshHealth { [weak self] in self?.fillTerminals() } }
+        // Adapter health runs tools (cmux socket-status, ghostty +show-config…): every third refresh is plenty.
+        if ticks % 3 == 0 {
+            Terminals.shared.refreshHealth { [weak self] in self?.fillTerminals() }
+            Terminals.shared.worker.run { [weak self] in
+                let problems = Terminals.shared.adapters.filter(\.restoresPanes).compactMap { $0.restoreProblem() }
+                DispatchQueue.main.async { if self?.restoreProblems != problems { self?.restoreProblems = problems } }
+            }
+        }
         ticks += 1
         fillTerminals()
         Notifier.shared.authorization { [weak self] s in self?.notifications = s }
@@ -126,6 +134,8 @@ struct GeneralPane: View {
     @AppStorage(Settings.Key.clickAction) private var clickAction = "open"
     @AppStorage(Settings.Key.hotKey) private var hotKey = true
     @AppStorage(Settings.Key.resumeCommand) private var resumeCommand = ""
+    @AppStorage(Settings.Key.restore) private var restore = true
+    @AppStorage(Settings.Key.restoreWithoutAsking) private var restoreWithoutAsking = false
 
     var body: some View {
         Form {
@@ -161,9 +171,21 @@ struct GeneralPane: View {
             }
             Section {
                 TextField("Resume command", text: $resumeCommand, prompt: Text("claude --resume {id}"))
-                Text("“Copy Resume Command” puts `cd <folder> && <this>` on the clipboard. {id} becomes the session ID.")
+                Text("“Copy Resume Command” puts `cd <folder> && <this>` on the clipboard, and Restore types it into reopened tabs. {id} becomes the session ID.")
                     .font(.callout).foregroundStyle(.secondary)
             } header: { Text("Resuming") }
+            Section {
+                Toggle("Offer to resume sessions when Ghostty reopens their tabs", isOn: $restore)
+                Toggle("Resume them without asking", isOn: $restoreWithoutAsking).disabled(!restore)
+                ForEach(live.restoreProblems, id: \.self) { problem in
+                    Label { Text(problem).font(.callout) } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                }
+            } header: { Text("Restore") } footer: {
+                Text("When Ghostty quits or the Mac restarts, the Claude Code sessions in its tabs end with it. When Ghostty brings the tabs back, the resume command is typed into each one, but only into a tab that is idle at a shell in the session's folder. Needs Ghostty 1.4 or later.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             Section {
                 Button("Preview the Clawds") { AppDelegate.shared?.tracker.showDemo() }
             }

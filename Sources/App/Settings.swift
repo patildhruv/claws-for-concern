@@ -24,6 +24,7 @@ enum Settings {
         static let resumeCommand = "resumeCommand", menuBarIcon = "menuBarIcon", menuBarCount = "menuBarCount"
         static let pausedUntil = "pausedUntil", didAskHooks = "didAskHooks"
         static let lockPosition = "lockPosition", snap = "snap", avoidDock = "avoidDock"
+        static let restore = "restore", restoreWithoutAsking = "restoreWithoutAsking"
     }
 
     // MARK: Appearance
@@ -121,8 +122,11 @@ enum Settings {
     static var hotKey: Bool { bool(Key.hotKey, true) }
     static var hotKeyCode: UInt32 { d.object(forKey: Key.hotKeyCode) == nil ? HotKey.defaultKeyCode : UInt32(d.integer(forKey: Key.hotKeyCode)) }
     static var hotKeyMods: UInt32 { d.object(forKey: Key.hotKeyMods) == nil ? HotKey.defaultModifiers : UInt32(d.integer(forKey: Key.hotKeyMods)) }
-    /// What "Copy Resume Command" puts on the clipboard; {id} is the session ID.
+    /// What "Copy Resume Command" puts on the clipboard and Restore types; {id} is the session ID.
     static var resumeCommand: String { nonEmpty(Key.resumeCommand) ?? "claude --resume {id}" }
+    /// Offer to resume the sessions a terminal's reopened tabs were running (Ghostty 1.4+).
+    static var restore: Bool { bool(Key.restore, true) }
+    static var restoreWithoutAsking: Bool { bool(Key.restoreWithoutAsking, false) }
     static var menuBarIcon: Bool { bool(Key.menuBarIcon, true) }
     static var menuBarCount: Bool { bool(Key.menuBarCount, true) }
 

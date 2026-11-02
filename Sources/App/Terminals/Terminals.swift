@@ -8,6 +8,10 @@ struct PaneInfo: Equatable {
     let id: String
     let cwd: String
     let name: String
+    /// The pane's terminal device, when the terminal reports it (Ghostty 1.4+).
+    var tty: String? = nil
+    /// The pane's foreground process, when the terminal reports it (Ghostty 1.4+).
+    var pid: Int32? = nil
     /// The title without Claude Code's status glyph ("✳ Fix login" -> "Fix login").
     var title: String { PaneInfo.stripGlyph(name) }
 
@@ -17,6 +21,38 @@ struct PaneInfo: Equatable {
             t = t.dropFirst()
         }
         return String(t).trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// A pane as a restore sees it: may a resume command be typed into it?
+struct RestorePane: Equatable {
+    let id: String
+    let cwd: String
+    /// The foreground process's name ("zsh", "vim"), "" if unknown.
+    let foreground: String
+    /// A shell is in front: nothing else runs in the pane.
+    let atShell: Bool
+    /// When the foreground process started (epoch seconds). A tab the terminal reopened has a
+    /// shell newer than the session's end; a tab that stayed open does not.
+    let started: Double?
+
+    /// For terminals that report each pane's foreground process ID.
+    static func from(id: String, cwd: String, foregroundPid pid: Int32?) -> RestorePane {
+        guard let pid, pid > 0, let e = ProcInfo.info(pid) else {
+            return RestorePane(id: id, cwd: cwd, foreground: "", atShell: false, started: nil)
+        }
+        let path = ProcInfo.path(pid)
+        let name = path.isEmpty ? e.name : (path as NSString).lastPathComponent
+        return RestorePane(id: id, cwd: cwd, foreground: name, atShell: isShell(name), started: e.start)
+    }
+
+    static let shells: Set<String> = ["zsh", "bash", "sh", "dash", "fish", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh", "pwsh"]
+
+    /// "zsh", "-zsh" (a login shell's argv[0]) or "/bin/zsh".
+    static func isShell(_ name: String) -> Bool {
+        var n = (name as NSString).lastPathComponent
+        while n.hasPrefix("-") { n.removeFirst() }
+        return shells.contains(n)
     }
 }
 
@@ -74,6 +110,22 @@ protocol TerminalAdapter: AnyObject {
     /// Worker, optional (default false): open a new pane in `dir` and type `command` into its shell
     /// (Search resumes a session this way). See `Terminals.newPane` for what happens before it.
     func newPane(in dir: String, typing command: String) -> Bool
+
+    // Restore: when the terminal relaunches and reopens its tabs under the same pane IDs, the
+    // conversations that were running in them come back (docs/adapters.md, "Restore").
+
+    /// True when the terminal reopens panes under their old IDs and this adapter implements
+    /// `restorablePanes` and `type(_:into:)`.
+    var restoresPanes: Bool { get }
+    /// The terminal's app: its launch starts a restore.
+    var appBundleID: String? { get }
+    /// Worker. Every pane, with what runs in front of it. nil when the terminal cannot say.
+    func restorablePanes() -> [RestorePane]?
+    /// Worker. Types `command` into the pane and presses Return. False if that did not work.
+    func type(_ command: String, into paneID: String) -> Bool
+    /// Worker. Why the terminal will not reopen its panes after a relaunch (a setting to change),
+    /// or nil. Shown in Settings → General → Restore.
+    func restoreProblem() -> String?
 }
 
 extension TerminalAdapter {
@@ -83,6 +135,11 @@ extension TerminalAdapter {
     func focusedPane(front: FrontApp) -> PaneInfo? { nil }
     func panes() -> [PaneInfo] { [] }
     var learnsPanes: Bool { false }
+    var restoresPanes: Bool { false }
+    var appBundleID: String? { scriptedBundleID }
+    func restorablePanes() -> [RestorePane]? { nil }
+    func type(_ command: String, into paneID: String) -> Bool { false }
+    func restoreProblem() -> String? { nil }
 }
 
 // MARK: - The coordinator
@@ -93,7 +150,7 @@ final class Terminals {
     static let shared = Terminals()
 
     /// Order matters: multiplexers first, so tmux inside Ghostty is tmux's.
-    let adapters: [TerminalAdapter] = [HerdrAdapter(), TmuxAdapter(), CmuxAdapter(), GhosttyAdapter(),
+    let adapters: [TerminalAdapter] = [HerdrAdapter(), TmuxAdapter(), CmuxAdapter(), GhosttyAdapter(bundleID: GhosttyAdapter.target),
                                        ITermAdapter(), AppleTerminalAdapter()]
     /// Anything else: bring forward whichever app hosts the session.
     let fallback = HostAppAdapter()

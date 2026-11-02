@@ -13,6 +13,8 @@ enum Paths {
     static var sessions: URL { root.appendingPathComponent("sessions", isDirectory: true) }
     /// The app's own memory: tab mapping, what you've seen, cached recaps.
     static var appState: URL { root.appendingPathComponent("app-state.json") }
+    /// Sessions killed with their terminal tab, to resume when the terminal reopens it. App-only.
+    static var restore: URL { root.appendingPathComponent("restore.json") }
     /// Empty working directory for the recap calls, so no project settings or CLAUDE.md load.
     static var summarizerCwd: URL { root.appendingPathComponent("summarizer", isDirectory: true) }
     static var log: URL { root.appendingPathComponent("claws.log") }
@@ -60,15 +62,20 @@ struct SessionState: Codable, Equatable {
     var termProgram: String?
     /// Terminal identifiers from Claude Code's environment (see TerminalContext). Adapters read these.
     var terminal: [String: String]?
-    /// Claude Code's controlling terminal ("/dev/ttys004"): how Terminal.app and iTerm2 tabs are matched.
+    /// Claude Code's controlling terminal ("/dev/ttys004"): how Terminal.app, iTerm2 and Ghostty 1.4
+    /// tabs are matched.
     var tty: String?
+    /// Set by a SessionEnd that was not a deliberate exit (the terminal quit, or the tab closed): the
+    /// session is over, but the app may offer to resume it, and removes the file itself.
+    var endReason: String?
+    var endedTs: Double?
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id", cwd, rootCwd = "root_cwd", transcriptPath = "transcript_path"
         case status, statusTs = "status_ts", updatedTs = "updated_ts", promptTs = "prompt_ts"
         case blockedKind = "blocked_kind", detail, lastMessage = "last_message", title
         case permissionMode = "permission_mode", claudePid = "claude_pid", claudeStart = "claude_start"
-        case termProgram = "term_program", terminal, tty
+        case termProgram = "term_program", terminal, tty, endReason = "end_reason", endedTs = "ended_ts"
     }
 
     /// One recorded terminal variable.

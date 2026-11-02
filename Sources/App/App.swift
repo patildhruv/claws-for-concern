@@ -47,6 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         Terminals.shared.start()
         tracker.start()
+        Restorer.shared.tracker = tracker
+        Restorer.shared.start()
         updateHotKey()
         Notifier.shared.setUp()
         // `ClawsForConcern --open-settings <tab>` from a script or the docs tooling.
@@ -288,9 +290,15 @@ enum CLI {
                                                                          userInfo: nil, deliverImmediately: true)
             return 0
         case "--terminals":
-            return Diagnostics.terminals()
+            return Diagnostics.terminals(rest)
         case "--open-session":
             return Diagnostics.open(rest.first ?? "")
+        case "--restore-status":
+            return RestoreCLI.status(rest)
+        case "--restore-run":
+            return RestoreCLI.run(rest)
+        case "--watch":
+            return RestoreCLI.watch(rest)
         case "--displays":
             _ = NSApplication.shared
             let saved = Placements.all
@@ -317,6 +325,12 @@ enum CLI {
               --recap TEXT      write a one-line recap of TEXT the way the app does
               --terminals       which terminal each live session is in, its pane, and what you are looking at
               --open-session ID jump to a session the way a click does (ID prefix is enough)
+              --restore-status  the restore ledger, and what a restore would do with each entry now
+              --restore-run [--yes] [--command TEMPLATE]
+                                run the restore now (--yes: type the resume command without asking)
+              --watch [--yes] [--seconds N] [--command TEMPLATE]
+                                track sessions and restore without the menu bar app, printing each step
+                                (the three restore commands take --bundle-id ID: a copy of Ghostty to drive)
               --displays        list displays and each one's saved spot
               --open-settings [TAB]  open the running app's Settings (general, clawds, appearance, …)
               --selftest        run the built-in checks (prints ALL PASS)

@@ -17,7 +17,8 @@ enum Diagnostics {
         return ok ? 0 : 1
     }
 
-    static func terminals() -> Int32 {
+    static func terminals(_ args: [String] = []) -> Int32 {
+        if let id = RestoreCLI.option("--bundle-id", args) { GhosttyAdapter.target = id }
         _ = NSApplication.shared
         let t = Terminals.shared
         let files = (try? FileManager.default.contentsOfDirectory(at: Paths.sessions, includingPropertiesForKeys: nil)) ?? []
@@ -26,6 +27,15 @@ enum Diagnostics {
         print("In front: \(front.bundleID ?? "nothing")\n")
         if sessions.isEmpty { print("No live Claude Code sessions.") }
         var looked: [String: Set<String>] = [:]
+        // Learning adapters list their panes once, as the app does: Ghostty 1.4 then names each
+        // session's tab by tty.
+        var listed = Set<String>()
+        for s in sessions {
+            let a = t.adapter(for: s)
+            guard a.learnsPanes, listed.insert(a.id).inserted else { continue }
+            if let b = a.scriptedBundleID { Automation.refresh(b) }
+            if a.scriptedBundleID.map({ Automation.cached($0) == .granted }) ?? true { _ = a.panes() }
+        }
         // Panes first: multiplexer adapters learn which servers to ask from them (as in the app).
         let panes = Dictionary(uniqueKeysWithValues: sessions.map { ($0.sessionId, t.adapter(for: $0).paneID(for: $0)) })
         for s in sessions.sorted(by: { $0.updatedTs > $1.updatedTs }) {
@@ -36,7 +46,8 @@ enum Diagnostics {
             }
             let pane = (panes[s.sessionId] ?? nil) ?? (a.learnsPanes ? "(learned by the app)" : "-")
             let seen = looked[a.id]?.contains(pane) == true ? "looking at it" : ""
-            print("\(s.sessionId.prefix(8))  \(s.status.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0)) \(a.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(pane)  \(seen)")
+            let status = s.endedTs == nil ? s.status.rawValue : "ended"
+            print("\(s.sessionId.prefix(8))  \(status.padding(toLength: 10, withPad: " ", startingAt: 0)) \(a.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(pane)  \(seen)")
         }
         print("\nIntegrations:")
         for a in t.adapters + [t.fallback] {

@@ -15,6 +15,7 @@ enum SelfTest {
         hookTransitions()
         geometry()
         terminals()
+        restore()
         orderedJSON()
         installer()
         text()
@@ -59,7 +60,7 @@ enum SelfTest {
         var stale = s
         check("older event dropped", HookEvent.apply(ev("UserPromptSubmit"), to: &stale, now: 5) == .ignore && stale?.status == .failed)
         check("compact keeps status", apply(ev("SessionStart", ["source": "compact"])) != .write || s?.status == .failed)
-        check("session end deletes", apply(ev("SessionEnd", ["reason": "other"])) == .delete)
+        check("/exit deletes", apply(ev("SessionEnd", ["reason": "prompt_input_exit"])) == .delete)
         // Ownership: a child `claude` that inherited the session ID must not touch the session.
         var owned: SessionState?
         _ = HookEvent.apply(ev("SessionStart", ["source": "startup", "cwd": "/drifted"]), to: &owned, now: 1, pid: 100,
@@ -131,6 +132,10 @@ enum SelfTest {
             ("Ghostty", "com.mitchellh.ghostty", "tell application id \"com.mitchellh.ghostty\" to get {id, working directory, name} of every terminal"),
             ("Terminal", "com.apple.Terminal", "tell application id \"com.apple.Terminal\" to get tty of selected tab of front window"),
             ("iTerm2", "com.googlecode.iterm2", "tell application id \"com.googlecode.iterm2\" to get tty of current session of current window"),
+            ("Ghostty (tty, pid)", "com.mitchellh.ghostty",
+             "tell application id \"com.mitchellh.ghostty\" to get {id, working directory, name, tty, pid} of every terminal"),
+            ("Ghostty (type a command)", "com.mitchellh.ghostty",
+             GhosttyAdapter.typeScript(app: "com.mitchellh.ghostty", terminal: "AB12-CD34", command: "claude --resume \"x\" \\ y")),
             ("Terminal (jump)", "com.apple.Terminal", AppleTerminalAdapter.focusScript(tty: "/dev/ttys001")),
             ("iTerm2 (jump)", "com.googlecode.iterm2", ITermAdapter.focusScript(tty: "/dev/ttys001")),
         ] where NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil {
@@ -138,6 +143,114 @@ enum SelfTest {
             check("applescript compiles against \(app)'s dictionary", NSAppleScript(source: source)?.compileAndReturnError(&err) == true,
                   String(describing: err))
         }
+    }
+
+    static func restore() {
+        // The hook: why a session ended decides whether it is kept for a restore.
+        let alive: (Int32, Double?) -> Bool = { _, _ in true }
+        var s: SessionState?
+        _ = HookEvent.apply(ev("SessionStart", ["source": "startup"]), to: &s, now: 1, pid: 100, pidStart: 5, isAlive: alive)
+        let started = s
+        check("hook: quitting the terminal keeps the session, marked ended",
+              HookEvent.apply(ev("SessionEnd", ["reason": "other"]), to: &s, now: 2, pid: 100, isAlive: alive) == .write
+                && s?.endReason == "other" && s?.endedTs == 2)
+        for reason in ["prompt_input_exit", "clear", "resume", "logout"] {
+            var d = started
+            check("hook: \(reason) deletes", HookEvent.apply(ev("SessionEnd", ["reason": reason]), to: &d, now: 2, pid: 100, isAlive: alive) == .delete)
+        }
+        var noReason = started
+        check("hook: a SessionEnd without a reason keeps it",
+              HookEvent.apply(ev("SessionEnd"), to: &noReason, now: 2, pid: 100, isAlive: alive) == .write && noReason?.endReason == "unknown")
+        var late = s
+        check("hook: a late event from the ended process is ignored",
+              HookEvent.apply(ev("Stop", ["last_assistant_message": "x"]), to: &late, now: 3, pid: 100, isAlive: alive) == .ignore && late?.endedTs == 2)
+        var back = s
+        check("hook: /resume back into it from the same process revives it",
+              HookEvent.apply(ev("SessionStart", ["source": "resume"]), to: &back, now: 4, pid: 100, isAlive: alive) == .write
+                && back?.endedTs == nil && back?.endReason == nil && back?.status == .idle)
+        var resumed = s
+        check("hook: a resume in a new process revives it",
+              HookEvent.apply(ev("UserPromptSubmit"), to: &resumed, now: 4, pid: 300, isAlive: { _, _ in false }) == .write
+                && resumed?.endedTs == nil && resumed?.claudePid == 300)
+        let saved = (try? JSONEncoder().encode(s)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        check("hook: ended fields on disk", saved.contains("\"end_reason\":\"other\"") && saved.contains("\"ended_ts\":2"), saved)
+
+        // The ledger.
+        func entry(_ sid: String, _ pane: String, _ ended: Double, folder: String = "/w") -> RestoreEntry {
+            RestoreEntry(sessionId: sid, adapter: "ghostty", pane: pane, folder: folder, title: "T \(sid)", endedTs: ended, reason: "other")
+        }
+        var l = RestoreLedger()
+        [entry("a", "P1", 10), entry("b", "P2", 10), entry("c", "P1", 20), entry("d", "P2", 5)].forEach { l.add($0) }
+        check("ledger: one entry per pane, the last session to end there wins", l.entries.map(\.sessionId).sorted() == ["b", "c"],
+              "\(l.entries.map(\.sessionId))")
+        l.add(entry("b", "P3", 30))
+        check("ledger: one entry per session", l.entries.filter { $0.sessionId == "b" }.map(\.pane) == ["P3"])
+        var old = l
+        old.expire(now: 20 + RestoreLedger.maxAge + 1)
+        check("ledger: entries expire after 7 days", old.entries.map(\.sessionId) == ["b"])
+        let json = (try? JSONEncoder().encode(l)) ?? Data()
+        check("ledger: JSON round trip", (try? JSONDecoder().decode(RestoreLedger.self, from: json)) == l
+              && String(decoding: json, as: UTF8.self).contains("\"session_id\""))
+
+        // The safety rules, with a real folder reached through a symlink (/tmp is /private/tmp).
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("claws-restore-\(getpid())")
+        let real = dir.appendingPathComponent("project"), link = dir.appendingPathComponent("link")
+        try? fm.createDirectory(at: real, withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(at: link, withDestinationURL: real)
+        defer { try? fm.removeItem(at: dir) }
+        let e = entry("s", "P", 100, folder: real.path)
+        func pane(_ id: String = "P", cwd: String? = nil, fg: String = "zsh", started: Double? = 200) -> RestorePane {
+            RestorePane(id: id, cwd: cwd ?? real.path, foreground: fg, atShell: RestorePane.isShell(fg), started: started)
+        }
+        func v(_ panes: [RestorePane], now: Double = 300) -> RestorePlan.Verdict { RestorePlan.verdict(e, panes: panes, now: now) }
+        check("restore: reopened tab, idle shell, same folder -> resume", v([pane("X"), pane()]) == .resume)
+        check("restore: the folder through a symlink is the same folder", v([pane(cwd: link.path)]) == .resume)
+        check("restore: no tab with that ID", v([pane("X")]) == .noPane)
+        check("restore: a program in front, not a shell", v([pane(fg: "vim")]) == .busy("vim"))
+        check("restore: a tab that stayed open (shell older than the end)", v([pane(started: 50)]) == .notReopened
+              && v([pane(started: nil)]) == .notReopened)
+        check("restore: another folder", v([pane(cwd: dir.path)]) == .otherFolder(dir.path))
+        check("restore: a folder that is gone", RestorePlan.verdict(entry("s", "P", 100, folder: real.path + "-gone"), panes: [pane()], now: 300)
+              != .resume)
+        check("restore: older than a week", v([pane()], now: 101 + RestoreLedger.maxAge) == .expired)
+        check("restore: shells", RestorePane.isShell("zsh") && RestorePane.isShell("-zsh") && RestorePane.isShell("-/bin/zsh")
+              && RestorePane.isShell("/opt/homebrew/bin/fish") && !RestorePane.isShell("vim") && !RestorePane.isShell("login")
+              && !RestorePane.isShell("2.1.316"))
+        check("restore: the command", RestorePlan.command("claude --resume {id}", e) == "claude --resume s")
+        check("restore: a relaunch is each entry's one chance", RestorePlan.spent(e, .noPane, launched: 150)
+              && !RestorePlan.spent(e, .resume, launched: 150) && !RestorePlan.spent(e, .noPane, launched: 50)
+              && !RestorePlan.spent(e, .noPane, launched: nil))
+        check("restore: a tab closed while the terminal kept running is forgotten",
+              RestorePlan.closedTabs([e], panes: [pane("X")], launched: 50) == ["s"]
+                && RestorePlan.closedTabs([e], panes: [pane()], launched: 50).isEmpty
+                && RestorePlan.closedTabs([e], panes: [pane("X")], launched: 150).isEmpty)
+
+        var w = RestoreWait(start: 0)
+        let busy = [pane(fg: "login")], idle = [pane()]
+        check("wait: a pane still starting is not settled", !w.settled(nil, at: 0.5, watching: ["P"]) && !w.settled(busy, at: 1, watching: ["P"])
+              && !w.settled(busy, at: 2, watching: ["P"]))
+        check("wait: settled once unchanged for 5 s, even if busy", w.settled(busy, at: 6.5, watching: ["P"]))
+        var w2 = RestoreWait(start: 0)
+        check("wait: settled on two equal looks with every pane at a shell", !w2.settled(idle, at: 1, watching: ["P"]) && w2.settled(idle, at: 2, watching: ["P"]))
+        var w3 = RestoreWait(start: 0, limit: 10)
+        check("wait: gives up at the limit", !w3.settled(nil, at: 9, watching: ["P"]) && w3.settled(nil, at: 10, watching: ["P"]))
+
+        // Ghostty: tabs by tty, its config, its version.
+        var m = TTYMap()
+        m.list([PaneInfo(id: "A", cwd: "/w", name: "a", tty: "/dev/ttys001"), PaneInfo(id: "B", cwd: "/w", name: "b", tty: "/dev/ttys002"),
+                PaneInfo(id: "C", cwd: "/w", name: "c")], at: 100)
+        check("tty: a session maps to the tab on its tty", m.pane(tty: "/dev/ttys002", since: 90) == "B" && m.pane(tty: "/dev/ttys009", since: 90) == nil)
+        check("tty: a sighting older than the session's process is not trusted", m.pane(tty: "/dev/ttys001", since: 150) == nil)
+        m.saw(PaneInfo(id: "D", cwd: "/w", name: "d", tty: "/dev/ttys001"), at: 200)
+        check("tty: a reused tty points at its new tab", m.pane(tty: "/dev/ttys001", since: 150) == "D")
+        m.list([PaneInfo(id: "B", cwd: "/w", name: "b", tty: "/dev/ttys002")], at: 300)
+        check("tty: a full listing forgets closed tabs", m.pane(tty: "/dev/ttys001", since: 0) == nil && m.pane(tty: "/dev/ttys002", since: 250) == "B")
+        check("ghostty: window-save-state from +show-config", GhosttyAdapter.saveState("font-size = 13\nwindow-save-state = always\n") == "always"
+              && GhosttyAdapter.saveState("font-size = 13\n") == nil)
+        check("ghostty: version check", GhosttyAdapter.isBefore("1.3.1", [1, 4]) && !GhosttyAdapter.isBefore("1.4.0", [1, 4])
+              && !GhosttyAdapter.isBefore("1.10", [1, 4]) && !GhosttyAdapter.isBefore("2.0", [1, 4]) && GhosttyAdapter.isBefore("1.4.0-dev", [1, 5]))
+        check("ghostty: restores, other terminals do not", Terminals.shared.adapters.filter(\.restoresPanes).map(\.id) == ["ghostty"])
     }
 
     static func geometry() {
