@@ -24,6 +24,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         }
         if item == nil {
             let it = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            // A fixed identity. Without one, macOS 26+ names the item after its title, which changes
+            // with the count, and menu bar managers (Thaw, Ice, Bartender) take each count for a new
+            // item: a second crab in their hidden section.
+            it.autosaveName = "ClawsForConcern"
             it.button?.image = PixelCrab.menuBarImage()
             it.button?.imagePosition = .imageLeading
             it.button?.setAccessibilityLabel("Claws for Concern")
