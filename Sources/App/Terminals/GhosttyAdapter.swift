@@ -268,10 +268,10 @@ extension GhosttyAdapter {
     /// A new tab in the front window (a new window when there is none) in `dir`, with `command` typed
     /// into its shell: typed rather than run, so the user's aliases apply and the tab stays open after.
     /// Never types into an existing terminal.
-    static func newPaneScript(in dir: String, typing command: String) -> String {
+    static func newPaneScript(app: String, in dir: String, typing command: String) -> String {
         """
         with timeout of 5 seconds
-          tell application id "com.mitchellh.ghostty"
+          tell application id \(Script.quote(app))
             set cfg to {initial working directory:\(Script.quote(dir)), initial input:\(Script.quote(command)) & linefeed}
             if (count of windows) > 0 then
               new tab in front window with configuration cfg
@@ -285,6 +285,6 @@ extension GhosttyAdapter {
     }
 
     func newPane(in dir: String, typing command: String) -> Bool {
-        Script.run(GhosttyAdapter.newPaneScript(in: dir, typing: command)) != nil
+        Script.run(GhosttyAdapter.newPaneScript(app: app, in: dir, typing: command)) != nil
     }
 }

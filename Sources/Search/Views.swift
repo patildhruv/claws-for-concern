@@ -76,7 +76,7 @@ struct ResultsColumn: View {
                 .contextMenu(forSelectionType: String.self) { ids in
                     if let s = model.session(ids.first) {
                         Button("Resume") { model.resume(s) }.disabled(!s.canResume)
-                        Button("Copy Resume Command") { model.copyCommand(s) }
+                        Button("Copy Resume Command") { model.copyCommand(s) }.disabled(s.resumeCommand() == nil)
                         Button("Copy Session ID") { model.copyID(s) }
                         Divider()
                         Button("Show Transcript in Finder") { model.reveal(s) }
@@ -243,10 +243,11 @@ struct DetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!session.canResume)
-                .help("Switches to its tab if it is still open, else resumes it in a new terminal tab")
+                .help(session.whyNotResumable ?? "Switches to its tab if it is still open, else resumes it in a new terminal tab")
                 Button { model.copyCommand(session) } label: {
                     Label("Copy Command", systemImage: "doc.on.doc")
                 }
+                .disabled(session.resumeCommand() == nil)
                 Button { model.copyID(session) } label: {
                     Label("Copy ID", systemImage: "number")
                 }
@@ -254,7 +255,7 @@ struct DetailView: View {
                     Label("Show Transcript", systemImage: "doc.text.magnifyingglass")
                 }
             }
-            Text(session.resumeCommand())
+            Text(session.resumeCommand() ?? "No resume command: this is not a session ID.")
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)

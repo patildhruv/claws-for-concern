@@ -123,7 +123,7 @@ enum Settings {
     static var hotKeyCode: UInt32 { d.object(forKey: Key.hotKeyCode) == nil ? HotKey.defaultKeyCode : UInt32(d.integer(forKey: Key.hotKeyCode)) }
     static var hotKeyMods: UInt32 { d.object(forKey: Key.hotKeyMods) == nil ? HotKey.defaultModifiers : UInt32(d.integer(forKey: Key.hotKeyMods)) }
     /// What "Copy Resume Command" puts on the clipboard and Restore types; {id} is the session ID.
-    static var resumeCommand: String { nonEmpty(Key.resumeCommand) ?? "claude --resume {id}" }
+    static var resumeCommand: String { nonEmpty(Key.resumeCommand) ?? ResumeCommand.defaultTemplate }
     /// Offer to resume the sessions a terminal's reopened tabs were running (Ghostty 1.4+).
     static var restore: Bool { bool(Key.restore, true) }
     static var restoreWithoutAsking: Bool { bool(Key.restoreWithoutAsking, false) }

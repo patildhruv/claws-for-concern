@@ -52,6 +52,9 @@ struct Session: Identifiable {
     let recordedCwd: String?
     /// True when no recorded directory matches the project folder and it couldn't be found on disk.
     let cwdUncertain: Bool
+    /// True when `cwd` is a folder recorded in the transcript (not found by walking the disk): the only
+    /// kind Claws for Concern reads back for itself before it opens a tab there.
+    let folderRecorded: Bool
     let title: String
     let titleSource: TitleSource
     let altTitles: [String]
@@ -72,12 +75,22 @@ struct Session: Identifiable {
 
     var displayCwd: String { cwd.map(Paths.abbreviate) ?? projectDir }
 
-    /// Claude Code's resume menu lists these; title-only `<uuid>.orphaned-…` stubs it cannot resume.
-    var canResume: Bool { cwd != nil && ResumeRequest.isSessionID(id) }
+    /// A session ID (title-only `<uuid>.orphaned-…` stubs are not), a folder from the transcript, and
+    /// that folder not known to be gone.
+    var canResume: Bool { whyNotResumable == nil }
 
-    /// `cd <folder> && <Claws for Concern's resume command>`, for the clipboard.
-    func resumeCommand(template: String = ResumeCommand.template()) -> String {
-        let run = ResumeCommand.expand(template, id: id)
+    var whyNotResumable: String? {
+        if !ResumeRequest.isSessionID(id) { return "Not a session Claude Code can resume" }
+        if !folderRecorded { return "Its folder is not recorded in the transcript" }
+        if folderMissing == true { return "Its folder no longer exists" }
+        return nil
+    }
+
+    /// `cd <folder> && <Claws for Concern's resume command>`, for the clipboard; nil unless the ID is
+    /// a session ID.
+    func resumeCommand(template: String = ResumeCommand.template()) -> String? {
+        guard ResumeRequest.isSessionID(id) else { return nil }
+        let run = ResumeCommand.expand(template, id: Shell.quote(id))
         guard let cwd else { return run }
         return "cd \(Shell.quote(cwd)) && \(run)"
     }
@@ -105,9 +118,11 @@ extension ProjectDirs {
             for kid in kids.sorted() {
                 let piece = "-" + encode(kid)
                 let path = dir == "/" ? "/" + kid : dir + "/" + kid
+                // Before isDir, which follows a link: one into ~/Documents would raise the prompt.
+                guard rest == piece || rest.hasPrefix(piece + "-"), !Paths.isPrivacyProtected(path) else { continue }
                 if rest == piece {
                     if isDir(path) { return path }
-                } else if rest.hasPrefix(piece + "-"), isDir(path), let found = walk(path, rest.dropFirst(piece.count)) {
+                } else if isDir(path), let found = walk(path, rest.dropFirst(piece.count)) {
                     return found
                 }
             }
@@ -126,10 +141,43 @@ enum Paths {
         return path
     }
 
-    /// Folders where even a stat makes macOS ask for permission on behalf of this app.
-    static func isPrivacyProtected(_ path: String) -> Bool {
-        let roots = ["Desktop", "Documents", "Downloads", "Library/Mobile Documents"].map { home + "/" + $0 } + ["/Volumes"]
-        return roots.contains { path == $0 || path.hasPrefix($0 + "/") }
+    /// Folders where even a stat makes macOS ask for permission on behalf of this app (other apps'
+    /// containers ask too), also under the data volume's firmlinked path.
+    static let protectedRoots: [String] = {
+        let mine = ["Desktop", "Documents", "Downloads", "Library/Mobile Documents", "Library/CloudStorage",
+                    "Library/Containers", "Library/Group Containers"].map { home + "/" + $0 }
+        return mine + mine.map { "/System/Volumes/Data" + $0 } + ["/Volumes"]
+    }()
+
+    /// True for a path in a protected folder, also when a symbolic link along it leads into one. Each
+    /// prefix is looked at with lstat and destinationOfSymbolicLink, which never follow a link, and
+    /// only once the text says the whole path is outside every protected folder.
+    static func isPrivacyProtected(_ path: String) -> Bool { isProtected(path, hops: 0) }
+
+    private static func isProtected(_ path: String, hops: Int) -> Bool {
+        if protectedRoots.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) { return true }
+        guard hops < 16 else { return true }    // a link loop: leave it alone
+        let parts = path.split(separator: "/").map(String.init)
+        var prefix = ""
+        for (i, part) in parts.enumerated() {
+            prefix += "/" + part
+            var st = stat()
+            guard lstat(prefix, &st) == 0 else { return false }    // nothing there, so no link to follow
+            guard st.st_mode & S_IFMT == S_IFLNK else { continue }
+            guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: prefix) else { return true }
+            let base = dest.hasPrefix("/") ? dest : (prefix as NSString).deletingLastPathComponent + "/" + dest
+            return isProtected(normalize(([base] + parts[(i + 1)...]).joined(separator: "/")), hops: hops + 1)
+        }
+        return false
+    }
+
+    /// `.`, `..` and repeated slashes removed by text alone (`standardizingPath` may look on disk).
+    static func normalize(_ path: String) -> String {
+        var out: [Substring] = []
+        for c in path.split(separator: "/") where c != "." {
+            if c == ".." { _ = out.popLast() } else { out.append(c) }
+        }
+        return "/" + out.joined(separator: "/")
     }
 }
 

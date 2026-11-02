@@ -171,7 +171,7 @@ struct GeneralPane: View {
             }
             Section {
                 TextField("Resume command", text: $resumeCommand, prompt: Text("claude --resume {id}"))
-                Text("“Copy Resume Command” puts `cd <folder> && <this>` on the clipboard, and Restore types it into reopened tabs. {id} becomes the session ID.")
+                Text("{id} becomes the session ID. Search's Resume types this into a new terminal tab in the session's folder and runs it, and Restore types it into reopened tabs; “Copy Resume Command” puts `cd <folder> && <this>` on the clipboard.")
                     .font(.callout).foregroundStyle(.secondary)
             } header: { Text("Resuming") }
             Section {

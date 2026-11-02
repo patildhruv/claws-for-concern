@@ -4,7 +4,11 @@ import SwiftUI
 @MainActor
 final class AppModel: ObservableObject {
     @Published var query = "" {
-        didSet { if query != oldValue { runSearch(after: 0.12) } }
+        didSet {
+            guard query != oldValue else { return }
+            resumeFirstHit = false      // typing after Return changes your mind
+            runSearch(after: 0.12)
+        }
     }
     @Published var scope: Scope {
         didSet {
@@ -31,19 +35,27 @@ final class AppModel: ObservableObject {
     @Published private(set) var indexNote = ""
     @Published private(set) var flash: String?
 
+    /// What Resume does with a session: ask Claws for Concern. The self-test records it instead.
+    var resumer: (Session) -> Void = { ResumeClient.shared.resume($0) }
+
     private var index: SearchIndex?
     private var outcome: SearchOutcome?
-    private let store = SessionStore()
+    private let store: SessionStore
     private var searchTask: Task<Void, Never>?
     private var excerptTask: Task<Void, Never>?
     private var flashTask: Task<Void, Never>?
     private var refreshQueued = false
     private var generation = 0
+    /// The search the results on screen came from; Return waits until they match the field.
+    private var shown: (generation: Int, query: String)?
+    private var resumeFirstHit = false
 
-    init() {
+    init(store: SessionStore = SessionStore()) {
+        self.store = store
         let saved = UserDefaults.standard.object(forKey: "scope") as? Int
         scope = saved.map { Scope(rawValue: UInt8(truncatingIfNeeded: $0)) } ?? .standard
         sort = SortMode(rawValue: UserDefaults.standard.string(forKey: "sort") ?? "") ?? .relevance
+        ResumeClient.shared.show = { [weak self] in self?.show(flash: $0) }
         refresh()
     }
 
@@ -98,7 +110,8 @@ final class AppModel: ObservableObject {
     private func runSearch(after delay: Double) {
         searchTask?.cancel()
         guard let index else { return }
-        let query = ParsedQuery(query)
+        let raw = self.query
+        let query = ParsedQuery(raw)
         let scope = scope
         let sort = sort
         generation += 1
@@ -108,7 +121,7 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled,
                   let out = index.search(query, scope: scope, sort: sort, cancelled: { Task.isCancelled }),
                   !Task.isCancelled else { return }
-            await self?.show(out, generation: gen)
+            await self?.show(out, generation: gen, query: raw)
 
             // Previews for the rows people will actually look at.
             let map = Snippets.rows(Array(out.hits.prefix(150)), out)
@@ -117,10 +130,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func show(_ out: SearchOutcome, generation gen: Int) {
+    private func show(_ out: SearchOutcome, generation gen: Int, query raw: String) {
         guard gen == generation else { return }
         outcome = out
         hits = out.hits
+        shown = (gen, raw)
+        if resumeFirstHit {
+            resumeFirstHit = false
+            if let first = hits.first { resume(first.session) }
+        }
         if let sel = selection, hits.contains(where: { $0.id == sel }) {
             loadExcerpts()
         } else {
@@ -173,64 +191,22 @@ final class AppModel: ObservableObject {
 
     // MARK: Actions
 
-    /// Asks Claws for Concern to resume the session: it switches to the session's tab if that is still
-    /// open, else opens a terminal tab in the session's folder and types the resume command. When
-    /// Claws is not running, does not answer, or cannot do it, the command goes on the clipboard.
-    func resume(_ s: Session) {
-        guard s.canResume, let cwd = s.cwd else { return }
-        let command = s.resumeCommand()
-        guard !NSRunningApplication.runningApplications(withBundleIdentifier: ResumeRequest.appID).isEmpty else {
-            copy(command, "Claws for Concern is not running. Command copied: \(command)")
-            return
-        }
-        listenForReplies()
-        let request = ResumeRequest(sessionId: s.id, folder: cwd)
-        pendingResumes[request.token] = (command, false)
-        DistributedNotificationCenter.default().postNotificationName(ResumeRequest.note, object: nil,
-                                                                     userInfo: request.userInfo, deliverImmediately: true)
-        // Claws answers at once, even when the tab takes longer; silence means it never got the request.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, let p = self.pendingResumes[request.token], !p.answered else { return }
-            self.pendingResumes[request.token] = nil
-            self.copy(command, "Claws for Concern did not answer. Command copied: \(command)")
-        }
-    }
-
-    private var pendingResumes: [String: (command: String, answered: Bool)] = [:]
-    private var replyObserver: NSObjectProtocol?
-
-    private func listenForReplies() {
-        guard replyObserver == nil else { return }
-        replyObserver = DistributedNotificationCenter.default().addObserver(forName: ResumeReply.note, object: nil,
-                                                                           queue: .main) { [weak self] note in
-            guard let reply = ResumeReply(userInfo: note.userInfo) else { return }
-            MainActor.assumeIsolated { self?.handle(reply) }
-        }
-    }
-
-    private func handle(_ reply: ResumeReply) {
-        guard let p = pendingResumes[reply.token] else { return }
-        switch reply.status {
-        case .opening:
-            pendingResumes[reply.token]?.answered = true
-            show(flash: reply.message)
-        case .focused, .opened:
-            pendingResumes[reply.token] = nil
-            show(flash: reply.message)
-        case .failed:
-            pendingResumes[reply.token] = nil
-            copy(p.command, "\(reply.message) Command copied.")
-        }
-    }
+    /// Through Claws for Concern (`ResumeClient`): its tab if it is still running, else a new one.
+    func resume(_ s: Session) { resumer(s) }
 
     func copyCommand(_ s: Session) {
-        let command = s.resumeCommand()
+        guard let command = s.resumeCommand() else { return }
         copy(command, "Copied: \(command)")
     }
     func copyID(_ s: Session) { copy(s.id, "Copied session ID") }
     func reveal(_ s: Session) { NSWorkspace.shared.activateFileViewerSelecting([s.file]) }
 
-    func resumeSelected() { if let s = selectedSession { resume(s) } }
+    /// Return in the search field. Until the results for what is in the field are on screen, the
+    /// selection belongs to the old ones: then Return resumes the first new hit when it arrives.
+    func resumeSelected() {
+        guard let shown, shown.generation == generation, shown.query == query else { resumeFirstHit = true; return }
+        if let s = selectedSession { resume(s) }
+    }
 
     private func copy(_ text: String, _ message: String) {
         NSPasteboard.general.clearContents()

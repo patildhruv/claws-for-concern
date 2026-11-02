@@ -374,23 +374,51 @@ enum SelfTest {
         check("shell quoting", "/Users/a b".shellQuoted == "'/Users/a b'" && "/Users/ab".shellQuoted == "/Users/ab")
     }
 
-    /// The search helper: resume requests, the new-tab script, the helper in the bundle and its own self-test.
+    /// The search helper: who may ask, what a request leads to, the new-tab script, the helper in the
+    /// bundle and its own self-test.
     static func search() {
         for (name, ok) in ResumeBridgeTests.run() { check(name, ok) }
-        check("search: the helper reads the same resume command as Settings", ResumeCommand.template(.standard) == Settings.resumeCommand,
-              "\(ResumeCommand.template(.standard)) vs \(Settings.resumeCommand)")
 
         let id = "0f1e2d3c-4b5a-6978-8a9b-acbdcedfe0f1"
-        let r = ResumeRequest(sessionId: id, folder: "/Users/someone/code")
-        check("search: a running session is switched to, never resumed twice",
-              SearchHelper.plan(r, live: true, filed: false, template: "claude -r {id}") == .focus)
+        let now = Date().timeIntervalSince1970
+        let r = ResumeRequest(sessionId: id, folder: "/Users/someone/code", nonce: "n1", sent: now)
+        let helper = URL(fileURLWithPath: "/Applications/Claws for Concern.app/Contents/Helpers/Claws Search.app")
+        let front: (url: URL?, pid: pid_t)? = (URL(fileURLWithPath: helper.path + "/"), 42)
+        check("search: our nonce, from the Search window in front, is accepted",
+              SearchHelper.refusal(nonce: "n1", issued: ["n1": 42], front: front, helper: helper) == nil
+              && SearchHelper.refusal(nonce: "n1", issued: ["n1": 0], front: front, helper: helper) == nil)
+        check("search: a nonce we never issued is refused", SearchHelper.refusal(nonce: "made-up", issued: ["n1": 42], front: front, helper: helper) != nil)
+        check("search: a nonce another Search process got is refused", SearchHelper.refusal(nonce: "n1", issued: ["n1": 7], front: front, helper: helper) != nil)
+        check("search: refused unless the Search window is in front",
+              SearchHelper.refusal(nonce: "n1", issued: ["n1": 42], front: (URL(fileURLWithPath: "/Applications/Ghostty.app"), 42), helper: helper) != nil
+              && SearchHelper.refusal(nonce: "n1", issued: ["n1": 42], front: nil, helper: helper) != nil)
+        check("search: requests more than 30 s old (or ahead) are dropped",
+              !SearchHelper.isStale(r, now: now + 29) && SearchHelper.isStale(r, now: now + 31) && SearchHelper.isStale(r, now: now - 31))
+
+        var withPid = SessionState(sessionId: id, cwd: "/w")
+        withPid.claudePid = 5
+        var noPid = SessionState(sessionId: id, cwd: "/w")
+        noPid.updatedTs = now - 3600
+        check("search: running means its Claude process is alive", SearchHelper.isRunning(withPid, hasPane: false, now: now) { _, _ in true }
+              && !SearchHelper.isRunning(withPid, hasPane: true, now: now) { _, _ in false })
+        check("search: no process on record, quiet for an hour: not running unless its pane is known",
+              !SearchHelper.isRunning(noPid, hasPane: false, now: now) { _, _ in true } && SearchHelper.isRunning(noPid, hasPane: true, now: now) { _, _ in false })
+        noPid.updatedTs = now - 60
+        check("search: no process on record, updated a minute ago: running", SearchHelper.isRunning(noPid, hasPane: false, now: now) { _, _ in false }
+              && !SearchHelper.isRunning(nil, hasPane: true, now: now) { _, _ in true })
+
+        func refused(_ p: SearchHelper.Plan) -> Bool { if case .refuse = p { return true } else { return false } }
         check("search: a closed session gets a new tab typing the resume command",
-              SearchHelper.plan(r, live: false, filed: true, template: "claude -r {id}") == .newPane(command: "claude -r \(id)"))
-        if case .refuse = SearchHelper.plan(r, live: false, filed: false, template: "claude -r {id}") {
-            check("search: no tab in a folder the session is not filed under", true)
-        } else {
-            check("search: no tab in a folder the session is not filed under", false)
-        }
+              SearchHelper.plan(r, folders: ["/Users/someone/code"], template: "claude -r {id}") == .newPane(command: "claude -r \(id)"))
+        check("search: only in the exact folder its transcript names", refused(SearchHelper.plan(r, folders: ["/Users/someone/other"], template: "x"))
+              && refused(SearchHelper.plan(r, folders: [], template: "x")) && refused(SearchHelper.plan(r, folders: ["/Users/someone/code/sub"], template: "x")))
+
+        var gate = ResumeGate()
+        check("search: one new tab per session at a time", gate.begin(id, now: now) == nil && gate.begin(id, now: now) != nil)
+        gate.end(id, opened: true, now: now)
+        check("search: none again for 15 s after one opened", gate.begin(id, now: now + 5) != nil && gate.begin(id, now: now + 16) == nil)
+        gate.end(id, opened: false, now: now + 16)
+        check("search: a failed attempt may be tried again at once", gate.begin(id, now: now + 17) == nil)
 
         final class Plain: TerminalAdapter {
             let id = "plain", name = "Plain"
@@ -400,9 +428,11 @@ enum SelfTest {
             func health() -> AdapterHealth { AdapterHealth(level: .ready, detail: "") }
         }
         check("search: adapters open no new panes unless they say so", !Plain().newPane(in: "/w", typing: "true"))
+        check("search: the new-tab script drives the adapter's own Ghostty",
+              GhosttyAdapter.newPaneScript(app: "com.example.ghostty-copy", in: "/w", typing: "x").contains("tell application id \"com.example.ghostty-copy\""))
         if NSWorkspace.shared.urlForApplication(withBundleIdentifier: GhosttyAdapter.bundleID) != nil {
             var err: NSDictionary?
-            let src = GhosttyAdapter.newPaneScript(in: "/Users/someone/a \"b\" \\c", typing: "claude --resume \(id)")
+            let src = GhosttyAdapter.newPaneScript(app: GhosttyAdapter.bundleID, in: "/Users/someone/a \"b\" \\c", typing: "claude --resume \(id)")
             check("applescript compiles against Ghostty's dictionary (new tab)", NSAppleScript(source: src)?.compileAndReturnError(&err) == true,
                   String(describing: err))
         }
@@ -413,11 +443,14 @@ enum SelfTest {
         let version = { (b: Bundle) in ["CFBundleShortVersionString", "CFBundleVersion"].map { b.object(forInfoDictionaryKey: $0) as? String } }
         check("search: helper in the bundle, same version", helper.bundleIdentifier == ResumeRequest.appID + ".search"
               && version(helper) == version(Bundle.main), "\(helper.bundleIdentifier ?? "?") \(version(helper)) vs \(version(Bundle.main))")
-        guard let res = Command.run(exe.path, ["--selftest"], timeout: 300) else {
+        // The helper also reads our resume command from our domain, its way, and compares it with ours.
+        guard let res = Command.run(exe.path, ["--selftest"], env: ["CLAWS_EXPECTED_RESUME_COMMAND": Settings.resumeCommand], timeout: 300) else {
             check("search: helper self-test ran", false, exe.path); return
         }
         let lines = res.out.split(separator: "\n")
-        for l in lines where l.hasPrefix("info ") || l.hasPrefix("FAIL") { print("     helper: " + l.prefix(140)) }
+        for l in lines where l.hasPrefix("info ") || l.hasPrefix("FAIL") { print("     helper: " + l.prefix(160)) }
+        check("search: the helper reads the same resume command as Settings",
+              lines.contains { $0.hasPrefix("PASS the resume command read from the app's domain") })
         check("search: helper self-test (\(lines.filter { $0.hasPrefix("PASS") }.count) checks) prints ALL PASS",
               res.status == 0 && lines.last == "ALL PASS", "exit \(res.status)")
     }

@@ -467,31 +467,39 @@ extension TerminalAdapter {
 }
 
 extension Terminals {
-    /// Opens a new pane in `dir` through the adapter and types `command` into it. A scripted terminal
-    /// that is not running is launched first, and its Automation permission is asked for if needed;
-    /// either can take a while, so both happen on the prompt thread and only the script itself runs
-    /// on the worker. `done` (main thread) says whether the pane opened.
-    func newPane(_ a: TerminalAdapter, in dir: String, typing command: String, done: @escaping (Bool) -> Void) {
-        prompter.run {
-            if let b = a.scriptedBundleID {
-                let ready = Terminals.launchIfNeeded(b)
-                let mine = ready && Automation.startAsking(b)
-                let status = ready ? Automation.check(b, ask: true) : .notRunning
-                if mine { Automation.doneAsking(b) }
-                guard status == .granted else { DispatchQueue.main.async { done(false) }; return }
-            }
+    /// Opens a new pane in `dir` through the adapter and types `command` into it, unless `deadline` has
+    /// passed by then. Allowed and running, the terminal is scripted straight away on the worker.
+    /// Otherwise it is launched and its Automation permission asked for on the prompt thread first:
+    /// both can take a while, and another app's unanswered prompt can hold that thread up, so the
+    /// deadline is checked again after them. `done` (main thread) says whether the pane opened.
+    func newPane(_ a: TerminalAdapter, in dir: String, typing command: String, until deadline: Date,
+                 done: @escaping (Bool) -> Void) {
+        let open = {
             self.worker.run {
-                let ok = a.newPane(in: dir, typing: command)
+                let ok = Date() < deadline && a.newPane(in: dir, typing: command)
                 DispatchQueue.main.async { done(ok) }
             }
         }
+        guard let b = a.scriptedBundleID, !(Automation.cached(b) == .granted && Terminals.isRunning(b)) else { open(); return }
+        prompter.run {
+            let ready = Date() < deadline && Terminals.launchIfNeeded(b)
+            let mine = ready && Automation.startAsking(b)
+            let status = ready ? Automation.check(b, ask: true) : .notRunning
+            if mine { Automation.doneAsking(b) }
+            guard status == .granted, Date() < deadline else { DispatchQueue.main.async { done(false) }; return }
+            open()
+        }
+    }
+
+    private static func isRunning(_ bundleID: String) -> Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first?.isFinishedLaunching == true
     }
 
     /// Prompt thread. Launches the app (without bringing it forward) unless it runs, and waits up to
     /// 10 s for it to finish launching. False if it is not installed or never got there.
     private static func launchIfNeeded(_ bundleID: String) -> Bool {
         func app() -> NSRunningApplication? { NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first }
-        if app()?.isFinishedLaunching == true { return true }
+        if isRunning(bundleID) { return true }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return false }
         if app() == nil {
             let cfg = NSWorkspace.OpenConfiguration()

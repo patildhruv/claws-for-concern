@@ -307,7 +307,9 @@ struct SessionBuilder {
         // The folder is the one the project folder name encodes. Claude Code 2.1.289 takes the last
         // `relocated` record, else the first cwd; for branched or hand-moved sessions it's a later
         // cwd, or only findable on disk.
+        // Claws for Concern reads the same rule back (`ProjectDirs.folder`) before it opens a tab.
         var cwd = ([relocatedCwd].compactMap { $0 } + cwds).first { ProjectDirs.matches($0, project) }
+        let recorded = cwd != nil
         if cwd == nil { cwd = resolve(project) }
         let uncertain = cwd == nil && !cwds.isEmpty
         if cwd == nil { cwd = cwds.first }
@@ -327,7 +329,7 @@ struct SessionBuilder {
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return Session(
             id: id, file: file, projectDir: project, cwd: cwd,
-            recordedCwd: cwds.first.flatMap { $0 == cwd ? nil : $0 }, cwdUncertain: uncertain,
+            recordedCwd: cwds.first.flatMap { $0 == cwd ? nil : $0 }, cwdUncertain: uncertain, folderRecorded: recorded,
             title: title, titleSource: source,
             altTitles: Array(Set(titles.values)).filter { $0 != title }.sorted(),
             firstPrompt: firstPrompt, gitBranch: gitBranch, entrypoint: entrypoint,

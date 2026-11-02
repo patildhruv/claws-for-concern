@@ -41,6 +41,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// ⌘W or ⌘Q right after Resume: wait up to 3 s for Claws' answer, else copy the command, then quit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            guard ResumeClient.shared.hasPending else { return .terminateNow }
+            ResumeClient.shared.settle(within: 3) { NSApp.reply(toApplicationShouldTerminate: true) }
+            return .terminateLater
+        }
+    }
 }
 
 struct SessionCommands: Commands {
@@ -58,7 +67,7 @@ struct SessionCommands: Commands {
                 .disabled(s?.canResume != true)
             Button("Copy Resume Command") { if let s { model.copyCommand(s) } }
                 .keyboardShortcut("c", modifiers: [.command, .shift])
-                .disabled(s == nil)
+                .disabled(s?.resumeCommand() == nil)
             Button("Copy Session ID") { if let s { model.copyID(s) } }
                 .keyboardShortcut("c", modifiers: [.command, .option])
                 .disabled(s == nil)
@@ -122,7 +131,9 @@ enum CLI {
     }
 
     /// `ClawsSearch --resume <session id or prefix>`: the Resume button's request to Claws for Concern,
-    /// printing each answer. Exits 0 once the tab is focused or opened, 1 otherwise.
+    /// printing each answer; exits 0 once the tab is focused or opened, 1 otherwise. It carries a nonce
+    /// Claws never issued and comes from a terminal, not the Search window, so a correct Claws refuses
+    /// it: this checks that refusal.
     static func resume(_ args: [String]) -> Int32 {
         guard let prefix = value(args, "--resume"), !prefix.isEmpty else {
             print("usage: ClawsSearch --resume <session id or prefix>"); return 2
@@ -131,12 +142,12 @@ enum CLI {
         guard matches.count == 1, let s = matches.first else {
             print(matches.isEmpty ? "no session \(prefix)" : "\(matches.count) sessions start with \(prefix)"); return 1
         }
-        print("\(s.title)\n  \(s.displayCwd)  \(s.id)\n  \(s.resumeCommand())")
-        guard s.canResume, let cwd = s.cwd else { print("not resumable (no folder, or not a session ID)"); return 1 }
+        print("\(s.title)\n  \(s.displayCwd)  \(s.id)\n  \(s.resumeCommand() ?? "(no resume command)")")
+        guard s.canResume, let cwd = s.cwd else { print("not resumable: \(s.whyNotResumable ?? "no folder")"); return 1 }
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: ResumeRequest.appID).isEmpty else {
             print("Claws for Concern is not running"); return 1
         }
-        let request = ResumeRequest(sessionId: s.id, folder: cwd)
+        let request = ResumeRequest(sessionId: s.id, folder: cwd, nonce: "cli-" + UUID().uuidString)
         var outcome: Int32?
         var answered = false
         let center = DistributedNotificationCenter.default()
