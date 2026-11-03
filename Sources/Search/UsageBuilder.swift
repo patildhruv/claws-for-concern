@@ -13,8 +13,9 @@ struct UsageBuilder {
         var at: Date?
         var model: String
         var tokens: SessionUsage.Tokens
-        var speed: String?
-        var geo: String?
+        /// `usage.speed == "fast"` and `usage.inference_geo == "us"`: both change the price.
+        var fast = false
+        var usOnly = false
         var webSearches = 0
         var subagent: Bool
     }
@@ -29,7 +30,9 @@ struct UsageBuilder {
     }
 
     private var replies: [String: Reply] = [:]
+    private var replyFile: [String: Int] = [:]
     private var replyOrder: [String] = []
+    private var errorIDs = Set<String>()
     /// Main-thread events in transcript order, for the context curve and "context now".
     private enum Mark { case reply(String), compaction(Int) }
     private var mainMarks: [Mark] = []
@@ -44,12 +47,13 @@ struct UsageBuilder {
     private var costState: CostState?
     private var costStateCurrent = false
     private var estimatedLines = (added: 0, removed: 0)
+    private var lineEdits: [(at: Date, added: Int, removed: Int)] = []
     private var cwds: [String] = []
     private var first: Date?
     private var last: Date?
     var subagentCount = 0
 
-    init(sessionID: String, projectDir: String, calendar: Calendar = .current) {
+    init(sessionID: String, projectDir: String, calendar: Calendar = .usage) {
         self.sessionID = sessionID
         self.projectDir = projectDir
         self.calendar = calendar
@@ -66,10 +70,14 @@ struct UsageBuilder {
     }
 
     /// One assistant line's usage. Lines of the same reply share `id` (Claude Code's `message.id`,
-    /// else its `requestId`); the last one seen wins.
-    mutating func reply(id: String, _ r: Reply) {
+    /// else its `requestId`); the last one seen wins. A reply belongs to the file it first appears in:
+    /// a forked subagent's transcript starts with copies of the main thread's replies.
+    mutating func reply(id: String, _ r: Reply, file: Int = 0) {
         saw(r.at)
-        if replies[id] == nil {
+        if let owner = replyFile[id] {
+            guard owner == file else { return }
+        } else {
+            replyFile[id] = file
             replyOrder.append(id)
             if !r.subagent { mainMarks.append(.reply(id)) }
         }
@@ -112,7 +120,9 @@ struct UsageBuilder {
         toolIntervals.append((start, at))
     }
 
-    mutating func apiError(_ e: SessionUsage.APIError) {
+    /// Claude Code's "API Error: …" line, once per `id` (its message ID) when it has one.
+    mutating func apiError(_ e: SessionUsage.APIError, id: String? = nil) {
+        if let id { guard errorIDs.insert(id).inserted else { return } }
         saw(e.at)
         errors.append(e)
     }
@@ -123,9 +133,11 @@ struct UsageBuilder {
         costStateCurrent = true
     }
 
-    mutating func editedLines(added: Int, removed: Int) {
+    /// Lines one Edit or Write changed, on the day of `at` (its tool result).
+    mutating func editedLines(added: Int, removed: Int, at: Date? = nil) {
         estimatedLines.added += added
         estimatedLines.removed += removed
+        if let at { lineEdits.append((at, added, removed)) }
     }
 
     /// Whether Claude Code's figure is this transcript's: written after the last main-thread reply, and
@@ -155,7 +167,7 @@ struct UsageBuilder {
             var m = u.byModel[r.model] ?? SessionUsage.ModelUsage()
             m.tokens.add(r.tokens)
             m.replies += 1
-            let usd = Pricing.cost(model: r.model, r.tokens, speed: r.speed, geo: r.geo, webSearches: r.webSearches)
+            let usd = Pricing.cost(model: r.model, r.tokens, speed: r.fast ? "fast" : nil, geo: r.usOnly ? "us" : nil, webSearches: r.webSearches)
             if let usd {
                 m.estimatedUSD = (m.estimatedUSD ?? 0) + usd
                 estimate += usd; anyPriced = true
@@ -225,6 +237,13 @@ struct UsageBuilder {
             }
         }
         for (start, end) in intervals { spread(start, end, into: &days) }
+        for e in lineEdits {
+            let key = dayKey(e.at)
+            var d = days[key.date] ?? SessionUsage.Day(date: key.date, weekday: key.weekday)
+            d.linesAdded += e.added
+            d.linesRemoved += e.removed
+            days[key.date] = d
+        }
         u.days = days.values.sorted { $0.date < $1.date }
 
         u.toolSeconds = Self.union(toolIntervals)
