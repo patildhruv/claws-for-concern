@@ -8,7 +8,8 @@ final class AppModel: ObservableObject {
         didSet {
             guard query != oldValue else { return }
             resumeFirstHit = false      // typing after Return changes your mind
-            runSearch(after: 0.12)
+            pendingShow = nil           // and after Open in Search, too
+            if !showing { runSearch(after: 0.12) }
         }
     }
     // Your choices are remembered, except in the demo, which always starts from the defaults, and in a
@@ -63,10 +64,11 @@ final class AppModel: ObservableObject {
     private var ranks: [String: UsageRank] = [:]
     private weak var usage: UsageModel?
     private var usageWatch: AnyCancellable?
-    /// `show(sessionID:projectDir:)` waiting: for the index (`pendingShow`), or for results that hold
-    /// the session (`pendingSelection`, a `Session.key`).
+    /// `show(sessionID:projectDir:)` called before the first read finished: done when it does, unless
+    /// you type first.
     private var pendingShow: (sessionID: String, projectDir: String?)?
-    private var pendingSelection: String?
+    /// Set while `show` clears the query itself, so that does not start a search or cancel the show.
+    private var showing = false
 
     init(store: SessionStore = SessionStore()) {
         self.store = store
@@ -90,24 +92,45 @@ final class AppModel: ObservableObject {
 
     /// Selects one session and makes sure the list shows it: for the Usage window's "Open in Search".
     /// Of the transcripts with that ID, the one filed under `projectDir` (Claude Code's folder name,
-    /// `Session.projectDir` and `SessionUsage.projectDir`), else the most recently active. If the
-    /// results on screen leave it out, the query is cleared (an empty query lists every session). Called
-    /// before the first read finishes, it waits for it. An ID Search does not know says so in the status line.
+    /// `Session.projectDir` and `SessionUsage.projectDir`), else the most recently active (ties: by path).
+    /// Done in one go, so nothing can come between: a search still on its way is dropped, a Return
+    /// waiting for one resumes nothing, and unless the results on screen are current and hold the
+    /// session, the query is cleared and every session listed at once. Called before the first read
+    /// finishes, it waits for it; typing meanwhile cancels it. An ID Search does not know says so in
+    /// the status line.
     func show(sessionID: String, projectDir: String?) {
         guard let index else { pendingShow = (sessionID, projectDir); return }
-        let copies = index.sessions.filter { $0.id == sessionID }
-        guard let pick = copies.first(where: { $0.projectDir == projectDir }) ?? copies.max(by: { $0.modified < $1.modified }) else {
+        pendingShow = nil
+        guard let pick = Self.pick(index.sessions.filter { $0.id == sessionID }, projectDir: projectDir) else {
             show(flash: "That session is not in Search any more.")
             return
         }
         resumeFirstHit = false
-        if hits.contains(where: { $0.id == pick.key }) {
-            pendingSelection = nil
+        let current = shown.map { $0.generation == generation && $0.query == query } ?? false
+        if current, hits.contains(where: { $0.id == pick.key }) {
             selection = pick.key
             return
         }
-        pendingSelection = pick.key
-        if query.trimmingCharacters(in: .whitespaces).isEmpty { runSearch(after: 0) } else { query = "" }
+        // Every session, now: the empty query's results are the sessions sorted, a few ms.
+        searchTask?.cancel()
+        showing = true
+        query = ""
+        showing = false
+        generation += 1
+        let gen = generation
+        guard let out = index.search(ParsedQuery(""), scope: scope, sort: sort, ranks: ranks, cancelled: { false }) else { return }
+        show(out, generation: gen, query: "", select: pick.key)
+        searchTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let map = Snippets.rows(Array(out.hits.prefix(150)), out)
+            guard !Task.isCancelled else { return }
+            await self?.showSnippets(map, generation: gen)
+        }
+    }
+
+    /// The copy `show` selects: the one filed under `projectDir`, else the most recently active, ties
+    /// broken by path (two copies here are byte-identical), so it is the same one every time.
+    static func pick(_ copies: [Session], projectDir: String?) -> Session? {
+        copies.first { $0.projectDir == projectDir } ?? copies.max { ($0.modified, $0.key) < ($1.modified, $1.key) }
     }
 
     var statusLine: String {
@@ -201,29 +224,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func show(_ out: SearchOutcome, generation gen: Int, query raw: String) {
+    /// Puts a search's results on screen. `select` is `show(sessionID:projectDir:)`'s session, selected
+    /// in the same turn as its rows arrive, so no Return or keystroke can fall in between.
+    private func show(_ out: SearchOutcome, generation gen: Int, query raw: String, select key: String? = nil) {
         guard gen == generation else { return }
         outcome = out
         hits = out.hits
         shown = (gen, raw)
+        if let key, hits.contains(where: { $0.id == key }) {
+            resumeFirstHit = false
+            if selection == key { loadExcerpts() } else { selection = key }
+            return
+        }
         if resumeFirstHit {
             resumeFirstHit = false
             if let first = hits.first { resume(first.session) }
         }
-        if let want = pendingSelection, hits.contains(where: { $0.id == want }) {
-            // A session asked for by `show(sessionID:projectDir:)`.
-            pendingSelection = nil
-            if selection == want { loadExcerpts() } else { selection = want }
-        } else if let sel = selection, hits.contains(where: { $0.id == sel }) {
-            // Every session, and not that one: it went in a refresh. Stop waiting for it.
-            if pendingSelection != nil && raw.trimmingCharacters(in: .whitespaces).isEmpty { pendingSelection = nil }
+        if let sel = selection, hits.contains(where: { $0.id == sel }) {
             loadExcerpts()
         } else {
-            if pendingSelection != nil && raw.trimmingCharacters(in: .whitespaces).isEmpty { pendingSelection = nil }
             // Next runloop turn, so the List has applied the new rows before selection moves.
             let first = hits.first?.id
             DispatchQueue.main.async { [weak self] in
-                guard let self, gen == self.generation, self.pendingSelection == nil else { return }
+                guard let self, gen == self.generation else { return }
                 self.selection = first
                 if first == nil { self.excerpts = []; self.excerptTotal = 0 }
             }

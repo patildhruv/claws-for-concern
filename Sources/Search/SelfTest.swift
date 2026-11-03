@@ -180,7 +180,9 @@ enum SelfTest {
 
         // Search's usage panel and list: wording and sorting; then the window on the demo's figures.
         for (name, ok) in UsagePanelTests.run() { check(name, ok) }
-        for (name, ok) in MainActor.assumeIsolated({ UsagePanelTests.window() + UsagePanelTests.copies() }) { check(name, ok) }
+        for (name, ok) in MainActor.assumeIsolated({
+            UsagePanelTests.window() + UsagePanelTests.copies() + UsagePanelTests.races() + UsagePanelTests.chart()
+        }) { check(name, ok) }
 
         // Last: it switches the home folder for the whole process, and back.
         for (name, ok) in MainActor.assumeIsolated({ demo() }) { check(name, ok) }

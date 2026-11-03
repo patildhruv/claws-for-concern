@@ -178,7 +178,7 @@ struct UsageDetails: View {
             GridRow {
                 DetailLabel("By model")
                 Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 2) {
-                    ForEach(UsageText.byModel(u, money: usage.money), id: \.name) { m in
+                    ForEach(UsageText.byModel(u, money: usage.money), id: \.id) { m in
                         GridRow {
                             Text(m.name)
                             Text(m.cost).monospacedDigit().gridColumnAlignment(.trailing)
@@ -339,12 +339,19 @@ struct ContextChart: View {
                         .foregroundStyle(Color.clayText.opacity(0.8))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
-                ForEach(points) { p in
-                    AreaMark(x: .value("Reply", p.x), y: .value("Tokens", p.tokens))
-                        .foregroundStyle(Color(nsColor: UsageStyle.fill).opacity(0.18))
-                    LineMark(x: .value("Reply", p.x), y: .value("Tokens", p.tokens))
+                if points.count == 1, let p = points.first {
+                    // One reply: a line needs two points, so a dot.
+                    PointMark(x: .value("Reply", p.x), y: .value("Tokens", p.tokens))
                         .foregroundStyle(Color(nsColor: UsageStyle.fill))
-                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .symbolSize(40)
+                } else {
+                    ForEach(points) { p in
+                        AreaMark(x: .value("Reply", p.x), y: .value("Tokens", p.tokens))
+                            .foregroundStyle(Color(nsColor: UsageStyle.fill).opacity(0.18))
+                        LineMark(x: .value("Reply", p.x), y: .value("Tokens", p.tokens))
+                            .foregroundStyle(Color(nsColor: UsageStyle.fill))
+                            .lineStyle(StrokeStyle(lineWidth: 1.5))
+                    }
                 }
                 ForEach(Array(marks.enumerated()), id: \.offset) { _, m in
                     RuleMark(x: .value("Compaction", min(max(m.x, 1), lastX)))
@@ -352,12 +359,13 @@ struct ContextChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 1.25))
                 }
             }
-            .chartXScale(domain: 1...max(lastX, 2))
+            // One point: in the middle, with one label under it.
+            .chartXScale(domain: points.count == 1 ? 0.5...1.5 : 1...max(lastX, 2))
             .chartYScale(domain: 0...top)
             .chartXAxis {
-                AxisMarks(values: [1, lastX]) { v in
+                AxisMarks(values: points.count == 1 ? [1] : [1, lastX]) { v in
                     let x = v.as(Double.self) ?? 1
-                    AxisValueLabel(anchor: x <= 1 ? .topLeading : .topTrailing) {
+                    AxisValueLabel(anchor: points.count == 1 ? .top : x <= 1 ? .topLeading : .topTrailing) {
                         Text(x <= 1 ? "reply 1" : "reply \(n.formatted(.number))")
                     }
                     .foregroundStyle(Color.quiet)

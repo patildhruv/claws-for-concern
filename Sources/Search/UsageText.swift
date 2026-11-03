@@ -25,14 +25,15 @@ struct UsageRank: Equatable {
     }
 
     /// Keyed by transcript path (`UsageModel.byFile`: a session ID filed in two project folders is two
-    /// rows, each with its own figures) and by session ID (`bySession`, all the demo has). A path
-    /// starts with "/", an ID never does.
+    /// rows, each with its own figures), or by session ID when there are no per-transcript figures at
+    /// all (the demo). Never both: a copy without figures of its own must not borrow the other copy's.
+    /// A path starts with "/", an ID never does.
     static func ranks(byID: [String: SessionUsage], byFile: [String: SessionUsage] = [:]) -> [String: UsageRank] {
-        byID.compactMapValues(UsageRank.init).merging(byFile.compactMapValues(UsageRank.init)) { _, file in file }
+        (byFile.isEmpty ? byID : byFile).compactMapValues(UsageRank.init)
     }
 
-    /// The rank for one of Search's sessions: its own transcript's, else by ID.
-    static func rank(_ s: Session, in ranks: [String: UsageRank]) -> UsageRank? { ranks[s.file.path] ?? ranks[s.id] }
+    /// The rank for one of Search's sessions: its own transcript's (keyed by path), else by ID (keyed by ID).
+    static func rank(_ s: Session, in ranks: [String: UsageRank]) -> UsageRank? { ranks[s.key] ?? ranks[s.id] }
 
     /// Highest first; sessions without the figure last. Ties, and the sessions without figures, newest
     /// first, then by ID, so the order is the same on every run.
@@ -81,9 +82,7 @@ enum UsageText {
     /// The Cost field: the amount and one line on where it comes from.
     static func cost(_ u: SessionUsage, money: (Double) -> String) -> (value: String, note: String) {
         let c = u.cost
-        guard let usd = c.usd else {
-            return ("Unknown", c.unpriced.isEmpty ? "Nothing in this session could be priced" : "No price for \(models(c.unpriced))")
-        }
+        guard let usd = c.usd else { return ("Unknown", unknownNote(c)) }
         if c.source == .claudeCode { return (money(usd), "Claude Code's own figure") }
         if isPartial(c) { return ("At least \(money(usd))\(est)", "No price for \(models(c.unpriced)), so those replies are left out") }
         var note = "Estimated from this session's tokens"
@@ -100,18 +99,24 @@ enum UsageText {
 
     static let pricesHelp = "What these tokens cost at Anthropic's API prices. On a subscription plan this is not your bill."
 
+    /// Why a cost is unknown, in the panel and the row's tooltip alike.
+    private static func unknownNote(_ c: SessionUsage.Cost) -> String {
+        c.unpriced.isEmpty ? "Nothing in this session could be priced" : "No price for \(models(c.unpriced))"
+    }
+
     static func rowCostHelp(_ u: SessionUsage) -> String {
-        if u.cost.usd == nil { return "No price for \(models(u.cost.unpriced)). " + pricesHelp }
+        if u.cost.usd == nil { return unknownNote(u.cost) + ". " + pricesHelp }
         if isPartial(u.cost) { return "At least this much: no price for \(models(u.cost.unpriced)). " + pricesHelp }
         return (u.cost.source == .claudeCode ? "Claude Code's own figure. " : "Estimated from this session's tokens. ") + pricesHelp
     }
 
-    /// Each model that replied, most output first: its estimate, or "no price".
-    static func byModel(_ u: SessionUsage, money: (Double) -> String) -> [(name: String, cost: String, replies: String)] {
+    /// Each model that replied, most output first: its estimate, or "no price". `id` is the model ID:
+    /// two IDs can read the same ("claude-haiku-4-5" and its dated "-20251001" are both "Haiku 4.5").
+    static func byModel(_ u: SessionUsage, money: (Double) -> String) -> [(id: String, name: String, cost: String, replies: String)] {
         u.models.compactMap { id in
             guard let m = u.byModel[id] else { return nil }
             let cost = m.estimatedUSD.map { money($0) + (m.unpricedReplies > 0 ? "+" : "") + est } ?? "No price"
-            return (UsageFormat.model(id), cost, plural(m.replies, "reply", "replies"))
+            return (id, UsageFormat.model(id), cost, plural(m.replies, "reply", "replies"))
         }
     }
 
@@ -165,14 +170,18 @@ enum UsageText {
         var parts = [UsageFormat.duration(u.turns.seconds) + (u.turns.source == .estimate ? est : "")]
         let days = u.days.filter { $0.workSeconds.reduce(0, +) > 0 }.count
         if days > 1 { parts.append("on \(days) days") }
-        if u.toolSeconds >= 1 { parts.append("tools ran \(UsageFormat.duration(u.toolSeconds)) of it") }
+        // "Of it" only when it is part of it: tool time measured over more than the turns (a tool
+        // waiting on you, say) is its own figure.
+        if u.toolSeconds >= 1 {
+            parts.append("tools ran \(UsageFormat.duration(u.toolSeconds))" + (u.toolSeconds <= u.turns.seconds ? " of it" : ""))
+        }
         return parts.joined(separator: " · ")
     }
 
     static func turns(_ u: SessionUsage) -> String {
         guard u.turns.count > 0 else { return "None recorded" }
-        return u.turns.count.formatted(.number) + (u.turns.source == .estimate ? est : "")
-            + " · longest \(UsageFormat.duration(u.turns.longestSeconds))"
+        let mark = u.turns.source == .estimate ? est : ""
+        return u.turns.count.formatted(.number) + mark + " · longest \(UsageFormat.duration(u.turns.longestSeconds))" + mark
     }
 
     /// "418 calls · Read 71 · Edit 50 · … · +4 more", the first `limit` tools by count; `all` lists
@@ -219,7 +228,7 @@ enum UsageText {
     static func summary(_ u: SessionUsage, money: (Double) -> String) -> String {
         var parts = [rowCost(u, money: money)]
         if let c = rowContext(u) { parts.append(c) }
-        if u.turns.count > 0 { parts.append(plural(u.turns.count, "turn")) }
+        if u.turns.count > 0 { parts.append(plural(u.turns.count, "turn") + (u.turns.source == .estimate ? est : "")) }
         return parts.joined(separator: " · ")
     }
 

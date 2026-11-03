@@ -100,8 +100,23 @@ path): 8 IDs here are filed under two project folders, and keyed by ID the list 
 identities and the second copy could never be selected. The list, the selection and the excerpts use
 the key; Copy ID, Resume and searching by ID use the ID. The Usage window's "Open in Search" calls
 `AppModel.show(sessionID:projectDir:)`: the copy filed under that project folder (else the most
-recently active one), the query cleared if the results leave it out, waiting for the first read if
-it is still going; an ID Search does not know says so in the status line.
+recently active one, ties by path), waiting for the first read if it is still going (typing
+meanwhile cancels it); an ID Search does not know says so in the status line. **It is done in one
+main-thread turn**: a search still on its way is dropped, a Return waiting for results is cancelled,
+and unless the results on screen are current and hold the session, the query is cleared and the
+empty query's results (every session, sorted: a few ms) are laid out and the session selected at
+once. Before 1.4 shipped it cleared the query and selected when the debounced search landed, and an
+independent review showed what fits in that gap: Return resumed the newest session instead of the
+one asked for, typing left the request stuck, and the request jumped back on a later search. The
+only Return that resumes a hit not yet on screen is still 1.3's: typed, then Return before the
+results arrive (resumes their first hit); `show` and further typing cancel it.
+
+Wording rules the review added: amounts under half a cent read "<$0.01" (`UsageFormat.usd`, so
+both windows); "tools ran X of it" only when tool time is within Claude's working time; estimated
+turns say "est." on the count, the longest and the folded line; one reply draws a dot (a line needs
+two points); By model rows are keyed by model ID (two IDs can read "Haiku 4.5"). A transcript's
+figures never fall back to another copy's: by ID only when there are no per-transcript figures at
+all (the demo).
 
 ## Resuming a session
 

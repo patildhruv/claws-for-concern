@@ -36,8 +36,16 @@ final class UsageModel: ObservableObject {
     subscript(id: String) -> SessionUsage? { bySession[id] }
 
     /// The figures for one of Search's sessions: its own transcript's, so a session ID filed in two project
-    /// folders shows each copy's own; else by ID (the demo). Prefer this wherever a `Session` is at hand.
-    func usage(for session: Session) -> SessionUsage? { byFile[session.file.path] ?? bySession[session.id] }
+    /// folders shows each copy's own. By ID only when there are no per-transcript figures at all (the
+    /// demo): a transcript not read yet, or with no figures, never shows another copy's. Prefer this
+    /// wherever a `Session` is at hand.
+    func usage(for session: Session) -> SessionUsage? {
+        Self.usage(for: session, byFile: byFile, bySession: bySession)
+    }
+
+    static func usage(for session: Session, byFile: [String: SessionUsage], bySession: [String: SessionUsage]) -> SessionUsage? {
+        byFile.isEmpty ? bySession[session.id] : byFile[session.file.path]
+    }
 
     func refresh() {
         if loading { queued = true; return }
@@ -67,7 +75,7 @@ final class UsageModel: ObservableObject {
 
 /// How the screens write usage figures, so Search and the Usage window say them the same way.
 enum UsageFormat {
-    /// "$0.42", "$12.40", "$1,284".
+    /// "$0.42", "$12.40", "$1,284"; "<$0.01" for an amount above zero that would round to $0.00.
     static func usd(_ v: Double) -> String {
         let f = NumberFormatter()
         f.numberStyle = .currency
@@ -75,7 +83,9 @@ enum UsageFormat {
         f.locale = Locale(identifier: "en_US")
         f.maximumFractionDigits = abs(v) >= 1000 ? 0 : 2
         f.minimumFractionDigits = abs(v) >= 1000 ? 0 : 2
-        return f.string(from: NSNumber(value: v)) ?? String(format: "$%.2f", v)
+        let s = f.string(from: NSNumber(value: v)) ?? String(format: "$%.2f", v)
+        // Decided on the text, not a threshold: where half a cent rounds is the formatter's business.
+        return v > 0 && s == "$0.00" ? "<$0.01" : s
     }
 
     /// "845", "12.3K", "1.24M", "3.1B".
