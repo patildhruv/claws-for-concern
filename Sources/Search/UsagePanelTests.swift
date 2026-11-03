@@ -92,7 +92,7 @@ enum UsagePanelTests {
         e.tools = ["Read": 9, "Bash": 9, "Edit": 3, "mcp__claude-in-chrome__computer": 2, "Glob": 1]
         let tools = UsageText.tools(e, limit: 3)
         check("tools: most used first, a name and its count never wrap apart, the rest counted",
-              tools.text == ["24 calls", "Bash\u{00A0}9", "Read\u{00A0}9", "Edit\u{00A0}3", "+2 more"].joined(separator: "\u{00A0}· ")
+              tools.text == ["24 calls", "Bash\u{00A0}9", "Read\u{00A0}9", "Edit\u{00A0}3", "+2\u{00A0}more"].joined(separator: "\u{00A0}· ")
               && tools.all.contains("chrome:\u{00A0}computer\u{00A0}2"))
         check("tools: eight shown by default", UsageText.tools(e).text.hasSuffix("Glob\u{00A0}1"))
         let nb = "\u{00A0}"
@@ -161,7 +161,7 @@ enum UsagePanelTests {
         check("demo: MCP tools by their server, and more tools than fit",
               figures["4f6a8e20-b7c3-4d91-8e5f-0c2d7b9a1e83"].map {
                   let t = UsageText.tools($0)
-                  return t.text.contains("chrome:\u{00A0}") && t.text.hasSuffix(" more") && t.all.contains("chrome:\u{00A0}read_page")
+                  return t.text.contains("chrome:\u{00A0}") && t.text.hasSuffix("\u{00A0}more") && t.all.contains("chrome:\u{00A0}read_page")
               } ?? false)
         check("demo: no row or panel figure reads $0.00",
               figures.values.allSatisfy { u in

@@ -186,7 +186,7 @@ enum UsageText {
         // A no-break space before each dot, so a wrapped line never starts with one.
         let dot = "\u{00A0}· "
         var text = ([plural(total, "call")] + sorted.prefix(limit)).joined(separator: dot)
-        if sorted.count > limit { text += dot + "+\(sorted.count - limit) more" }
+        if sorted.count > limit { text += dot + "+\(sorted.count - limit)\u{00A0}more" }
         return (text, sorted.joined(separator: "\n"))
     }
 
