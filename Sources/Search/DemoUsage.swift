@@ -27,6 +27,8 @@ extension Demo {
         var errors: [String] = []
         var lines = (added: 0, removed: 0)
         var output = 300...2_800
+        /// MCP tools this session also called, as Claude Code names them (`mcp__<server>__<tool>`).
+        var mcpTools: [String] = []
     }
 
     static let usageSpecs: [String: UsageSpec] = [
@@ -42,7 +44,10 @@ extension Demo {
                                                           endShare: 1, record: .none, lines: (44, 44)),
         "4f6a8e20-b7c3-4d91-8e5f-0c2d7b9a1e83": UsageSpec(model: "claude-opus-5-5", hours: 1.8, replies: 120, peak: 380_000,
                                                           endShare: 1, subagents: 1, subagentModel: "claude-haiku-4-5-20251001",
-                                                          lines: (210, 8)),
+                                                          lines: (210, 8),
+                                                          // A browser to look at the chart: Search shows these as "chrome: …".
+                                                          mcpTools: ["mcp__claude-in-chrome__computer", "mcp__claude-in-chrome__navigate",
+                                                                     "mcp__claude-in-chrome__read_page"]),
         "c38b1e7d-5a24-49f6-b0d3-8e1f6a2c9b57": UsageSpec(model: "claude-fable-5-1", hours: 4, replies: 300, peak: 900_000,
                                                           compactions: 2, endShare: 0.55, otherModel: "claude-opus-5-5",
                                                           otherShare: 0.3, errors: ["rate_limit", "rate_limit", "rate_limit"],
@@ -119,6 +124,7 @@ extension Demo {
 
         var j = 0, previous = 0, lastSegment = 0, tool = 0, agentsLeft = spec.subagents
         let toolNames = ["Read", "Read", "Bash", "Edit", "Grep", "Read", "Bash", "Edit", "Glob", "TodoWrite", "Write", "WebFetch"]
+            + spec.mcpTools.flatMap { [$0, $0] }
         var errorTimes = spec.errors.indices.map { _ in start.addingTimeInterval(rng.unit() * spec.hours * 3600) }.sorted()
         for t in 0..<turns {
             let turnStart = start.addingTimeInterval(Double(t) * slot + (t == 0 ? 0 : rng.unit() * slot * 0.3))

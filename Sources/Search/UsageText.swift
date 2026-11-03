@@ -24,15 +24,23 @@ struct UsageRank: Equatable {
         }
     }
 
-    static func ranks(_ all: [String: SessionUsage]) -> [String: UsageRank] { all.compactMapValues(UsageRank.init) }
+    /// Keyed by transcript path (`UsageModel.byFile`: a session ID filed in two project folders is two
+    /// rows, each with its own figures) and by session ID (`bySession`, all the demo has). A path
+    /// starts with "/", an ID never does.
+    static func ranks(byID: [String: SessionUsage], byFile: [String: SessionUsage] = [:]) -> [String: UsageRank] {
+        byID.compactMapValues(UsageRank.init).merging(byFile.compactMapValues(UsageRank.init)) { _, file in file }
+    }
+
+    /// The rank for one of Search's sessions: its own transcript's, else by ID.
+    static func rank(_ s: Session, in ranks: [String: UsageRank]) -> UsageRank? { ranks[s.file.path] ?? ranks[s.id] }
 
     /// Highest first; sessions without the figure last. Ties, and the sessions without figures, newest
     /// first, then by ID, so the order is the same on every run.
-    static func order<T>(_ items: inout [T], by sort: SortMode, ranks: [String: UsageRank],
+    static func order<T>(_ items: inout [T], by sort: SortMode, rank: (T) -> UsageRank?,
                          id: (T) -> String, modified: (T) -> Date) {
         guard sort.usesFigures else { return }
         let keyed = items.map { item -> (item: T, key: Double?, modified: Date, id: String) in
-            let r = ranks[id(item)]
+            let r = rank(item)
             return (item, sort == .cost ? r?.cost : r?.context, modified(item), id(item))
         }
         items = keyed.sorted { a, b in
@@ -46,7 +54,7 @@ struct UsageRank: Equatable {
     }
 
     static func order(_ hits: inout [Hit], by sort: SortMode, ranks: [String: UsageRank]) {
-        order(&hits, by: sort, ranks: ranks, id: \.id, modified: \.session.modified)
+        order(&hits, by: sort, rank: { rank($0.session, in: ranks) }, id: \.id, modified: \.session.modified)
     }
 }
 
@@ -175,8 +183,10 @@ enum UsageText {
         let sorted = u.tools.sorted { ($0.value, $1.key) > ($1.value, $0.key) }
             .map { "\(UsageFormat.tool($0.key))\u{00A0}\($0.value.formatted(.number))" }
         let total = u.tools.values.reduce(0, +)
-        var text = ([plural(total, "call")] + sorted.prefix(limit)).joined(separator: " · ")
-        if sorted.count > limit { text += " · +\(sorted.count - limit) more" }
+        // A no-break space before each dot, so a wrapped line never starts with one.
+        let dot = "\u{00A0}· "
+        var text = ([plural(total, "call")] + sorted.prefix(limit)).joined(separator: dot)
+        if sorted.count > limit { text += dot + "+\(sorted.count - limit) more" }
         return (text, sorted.joined(separator: "\n"))
     }
 
@@ -281,6 +291,9 @@ extension UsageFormat {
         case "overloaded", "overloaded_error": return "overloaded"
         case "api_error": return "API error"
         case "invalid_request", "invalid_request_error": return "invalid request"
+        case "authentication_failed", "authentication_error": return "sign-in failed"
+        case "oauth_org_not_allowed": return "not allowed for this organisation"
+        case "unknown": return "unknown error"
         default: return kind.replacingOccurrences(of: "_", with: " ")
         }
     }
@@ -302,6 +315,7 @@ extension UsageFormat {
         } else if server.hasPrefix("claude-in-"), server.count > "claude-in-".count {
             server = String(server.dropFirst("claude-in-".count))
         }
-        return server.replacingOccurrences(of: "_", with: " ") + ": " + parts.dropFirst().joined(separator: "__")
+        // A no-break space: "server:" never ends a line without its tool.
+        return server.replacingOccurrences(of: "_", with: " ") + ":\u{00A0}" + parts.dropFirst().joined(separator: "__")
     }
 }

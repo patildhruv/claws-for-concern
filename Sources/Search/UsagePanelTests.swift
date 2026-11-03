@@ -18,15 +18,18 @@ enum UsagePanelTests {
         ]
         func sorted(_ mode: SortMode) -> String {
             var list = items
-            UsageRank.order(&list, by: mode, ranks: ranks, id: \.id, modified: \.modified)
+            UsageRank.order(&list, by: mode, rank: { ranks[$0.id] }, id: \.id, modified: \.modified)
             return list.map(\.id).joined()
         }
         check("cost: highest first, ties newest first, sessions without a cost last (newest first)", sorted(.cost) == "ceafbd")
         check("context: fullest first, sessions without figures last", sorted(.context) == "ebafdc")
         check("relevance and recent leave the order to the search", sorted(.relevance) == "abcdef" && sorted(.recent) == "abcdef")
         var same = [Item]([("y", now), ("x", now)])
-        UsageRank.order(&same, by: .cost, ranks: [:], id: \.id, modified: \.modified)
+        UsageRank.order(&same, by: .cost, rank: { _ in nil }, id: \.id, modified: \.modified)
         check("equal and without figures: by ID, the same on every run", same.map(\.id) == ["x", "y"])
+        let both = UsageRank.ranks(byID: ["s": usage(model: "claude-opus-5-5", now: 100_000)],
+                                   byFile: ["/p/a/s.jsonl": usage(model: "claude-opus-5-5", now: 500_000)])
+        check("ranks: a transcript's own figures win over its ID's", both["/p/a/s.jsonl"]?.context == 0.5 && both["s"]?.context == 0.1)
 
         var opus = usage(model: "claude-opus-5-5", now: 849_000)
         check("rank: a known window gives the share", UsageRank(opus)?.context == 0.849)
@@ -89,15 +92,19 @@ enum UsagePanelTests {
         e.tools = ["Read": 9, "Bash": 9, "Edit": 3, "mcp__claude-in-chrome__computer": 2, "Glob": 1]
         let tools = UsageText.tools(e, limit: 3)
         check("tools: most used first, a name and its count never wrap apart, the rest counted",
-              tools.text == "24 calls · Bash\u{00A0}9 · Read\u{00A0}9 · Edit\u{00A0}3 · +2 more" && tools.all.contains("chrome: computer\u{00A0}2"))
+              tools.text == ["24 calls", "Bash\u{00A0}9", "Read\u{00A0}9", "Edit\u{00A0}3", "+2 more"].joined(separator: "\u{00A0}· ")
+              && tools.all.contains("chrome:\u{00A0}computer\u{00A0}2"))
         check("tools: eight shown by default", UsageText.tools(e).text.hasSuffix("Glob\u{00A0}1"))
-        check("MCP tools as server: tool, without Claude Code's prefixes",
-              UsageFormat.tool("mcp__srv__do__it") == "srv: do__it" && UsageFormat.tool("mcp__claude-in-chrome__computer") == "chrome: computer"
-              && UsageFormat.tool("mcp__plugin_firebase_firebase__firebase_init") == "firebase: firebase_init"
-              && UsageFormat.tool("mcp__claude_ai_Google_Drive__authenticate") == "Google Drive: authenticate"
-              && UsageFormat.tool("mcp__playwright__browser_click") == "playwright: browser_click"
+        let nb = "\u{00A0}"
+        check("MCP tools as server: tool, without Claude Code's prefixes, never broken after the colon",
+              UsageFormat.tool("mcp__srv__do__it") == "srv:\(nb)do__it" && UsageFormat.tool("mcp__claude-in-chrome__computer") == "chrome:\(nb)computer"
+              && UsageFormat.tool("mcp__plugin_firebase_firebase__firebase_init") == "firebase:\(nb)firebase_init"
+              && UsageFormat.tool("mcp__claude_ai_Google_Drive__authenticate") == "Google Drive:\(nb)authenticate"
+              && UsageFormat.tool("mcp__playwright__browser_click") == "playwright:\(nb)browser_click"
               && UsageFormat.tool("Bash") == "Bash" && UsageFormat.tool("mcp__") == "mcp__" && UsageFormat.tool("mcp__x__") == "mcp__x__")
-        check("error kinds in words", UsageFormat.errorKind("rate_limit") == "rate limit" && UsageFormat.errorKind("some_new_kind") == "some new kind")
+        check("error kinds in words", UsageFormat.errorKind("rate_limit") == "rate limit" && UsageFormat.errorKind("some_new_kind") == "some new kind"
+              && UsageFormat.errorKind("authentication_failed") == "sign-in failed" && UsageFormat.errorKind("unknown") == "unknown error"
+              && UsageFormat.errorKind("billing_error") == "billing error")
         let c = SessionUsage.Compaction(at: t0, trigger: "auto", preTokens: 948_000, postTokens: 31_000, droppedTokens: nil, seconds: 75)
         check("compaction: how, before → after, how long", UsageText.compaction(c).hasSuffix(" · automatic · 948K → 31K · took 1m"))
 
@@ -150,6 +157,11 @@ enum UsagePanelTests {
         check("demo: the unpriced model's cost is unknown and its context has no share",
               figures["3e8a2c6f-9b14-4d7e-b2a5-7f0c1e9d4b68"].map {
                   UsageText.rowCost($0, money: UsageFormat.usd) == "Cost unknown" && $0.contextFraction == nil
+              } ?? false)
+        check("demo: MCP tools by their server, and more tools than fit",
+              figures["4f6a8e20-b7c3-4d91-8e5f-0c2d7b9a1e83"].map {
+                  let t = UsageText.tools($0)
+                  return t.text.contains("chrome:\u{00A0}") && t.text.hasSuffix(" more") && t.all.contains("chrome:\u{00A0}read_page")
               } ?? false)
         check("demo: no row or panel figure reads $0.00",
               figures.values.allSatisfy { u in

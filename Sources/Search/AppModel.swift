@@ -11,16 +11,18 @@ final class AppModel: ObservableObject {
             runSearch(after: 0.12)
         }
     }
-    // Your choices are remembered, except in the demo, which always starts from the defaults.
+    // Your choices are remembered, except in the demo, which always starts from the defaults, and in a
+    // snapshot, which sets them from its flags.
+    var remembers = !Demo.active
     @Published var scope: Scope {
         didSet {
-            if !Demo.active { UserDefaults.standard.set(Int(scope.rawValue), forKey: "scope") }
+            if remembers { UserDefaults.standard.set(Int(scope.rawValue), forKey: "scope") }
             if scope != oldValue { runSearch(after: 0) }
         }
     }
     @Published var sort: SortMode {
         didSet {
-            if !Demo.active { UserDefaults.standard.set(sort.rawValue, forKey: "sort") }
+            if remembers { UserDefaults.standard.set(sort.rawValue, forKey: "sort") }
             if sort != oldValue { runSearch(after: 0) }
         }
     }
@@ -29,7 +31,7 @@ final class AppModel: ObservableObject {
     }
     /// The detail pane's Usage section open or folded away (remembered, except in the demo).
     @Published var usageShown: Bool {
-        didSet { if !Demo.active { UserDefaults.standard.set(usageShown, forKey: "usageShown") } }
+        didSet { if remembers { UserDefaults.standard.set(usageShown, forKey: "usageShown") } }
     }
     @Published private(set) var hits: [Hit] = []
     @Published private(set) var snippets: [String: AttributedString] = [:]
@@ -94,12 +96,16 @@ final class AppModel: ObservableObject {
     func attach(_ usage: UsageModel) {
         guard self.usage !== usage else { return }
         self.usage = usage
-        // $bySession sends the current figures at once, then each change (before it is stored: use the value).
-        usageWatch = usage.$bySession.sink { [weak self] all in self?.setUsage(all) }
+        // `updated` is set once per read, after both maps; its publisher sends at once, then on each read
+        // (as it is about to be stored, when bySession and byFile already hold the new figures).
+        usageWatch = usage.$updated.sink { [weak self, weak usage] _ in
+            guard let usage else { return }
+            self?.setUsage(usage.bySession, byFile: usage.byFile)
+        }
     }
 
-    func setUsage(_ all: [String: SessionUsage]) {
-        let new = UsageRank.ranks(all)
+    func setUsage(_ byID: [String: SessionUsage], byFile: [String: SessionUsage] = [:]) {
+        let new = UsageRank.ranks(byID: byID, byFile: byFile)
         guard new != ranks else { return }
         ranks = new
         if sort.usesFigures { runSearch(after: 0) }

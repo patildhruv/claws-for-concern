@@ -106,7 +106,7 @@ struct ResultsColumn: View {
                     // The usage line only once there are figures to show, so a Search without them
                     // keeps its rows as they were.
                     ResultRow(hit: hit, snippet: model.snippets[hit.id], selected: selected,
-                              usage: usage.bySession.isEmpty ? nil : .some(usage[hit.id]))
+                              usage: usage.bySession.isEmpty ? nil : .some(usage.usage(for: hit.session)))
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) { model.selection = hit.id; model.resume(hit.session) }
                         .simultaneousGesture(TapGesture().onEnded {

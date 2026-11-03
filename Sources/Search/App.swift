@@ -250,6 +250,7 @@ enum Snapshot {
         func wait(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
         let model = AppModel()
+        model.remembers = false     // --sort and --usage-hidden are for this picture, not your next search
         let usage = UsageModel()
         model.attach(usage)
         while model.indexing || usage.updated == nil { wait(0.2) }

@@ -93,7 +93,7 @@ struct UsageSection: View {
     let session: Session
 
     var body: some View {
-        let u = usage[session.id].flatMap { $0.replies > 0 ? $0 : nil }
+        let u = usage.usage(for: session).flatMap { $0.replies > 0 ? $0 : nil }
         VStack(alignment: .leading, spacing: 12) {
             Button { model.usageShown.toggle() } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -129,7 +129,7 @@ struct UsageSection: View {
     /// Never zeros: no figures yet is said in words.
     private var placeholder: String {
         if usage.updated == nil { return "Reading usage…" }
-        if usage[session.id] != nil { return "Claude has not replied in this session yet." }
+        if usage.usage(for: session) != nil { return "Claude has not replied in this session yet." }
         return "No usage figures for this session yet."
     }
 }
@@ -253,13 +253,16 @@ struct UsageDetails: View {
     @ViewBuilder
     private var contextNow: some View {
         if let text = UsageText.context(u) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                if let f = u.contextFraction {
-                    ContextBar(fraction: f, near: u.isNearContextLimit)
-                        .frame(width: 160, height: 8)
-                        .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    if let f = u.contextFraction {
+                        ContextBar(fraction: f, near: u.isNearContextLimit)
+                            .frame(width: 160, height: 8)
+                            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                    }
+                    Text(text).monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(text).monospacedDigit()
                 if u.isNearContextLimit {
                     Text("Near the limit")
                         .font(.callout.weight(.semibold))
