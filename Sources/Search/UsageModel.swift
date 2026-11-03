@@ -11,8 +11,8 @@ final class UsageModel: ObservableObject {
     /// When the figures were last read; nil until the first read finishes.
     @Published private(set) var updated: Date?
 
-    /// The currency shown next to dollars, when turned on and its rate is known. Set by the currency
-    /// setting (opt-in, a rate fetched at most once a day); nil shows dollars only.
+    /// The currency shown next to dollars, when turned on and its rate is known. Follows
+    /// `SecondCurrencySetting.shared` (opt-in, a rate fetched at most once a day); nil shows dollars only.
     @Published var second: SecondCurrency?
 
     struct SecondCurrency: Equatable {
@@ -28,6 +28,7 @@ final class UsageModel: ObservableObject {
 
     init(store: UsageStore = UsageStore()) {
         self.store = store
+        SecondCurrencySetting.shared.$active.assign(to: &$second)
         refresh()
     }
 
@@ -52,8 +53,11 @@ final class UsageModel: ObservableObject {
 
     /// A cost as the screens write it: "$12.40", plus the second currency when it is on. The caller adds
     /// "est." for an estimate (`SessionUsage.Cost.source`) and says "at API prices" where it fits.
+    /// With the second currency on: "$12.40 (₹1.17K)".
     func money(_ usd: Double) -> String {
-        UsageFormat.usd(usd)
+        let dollars = UsageFormat.usd(usd)
+        guard let s = second else { return dollars }
+        return "\(dollars) (\(CurrencyFormat.amount(usd * s.perUSD, code: s.code)))"
     }
 }
 
