@@ -3,27 +3,9 @@ import AppKit
 import Charts
 import SwiftUI
 
-/// Colours for the usage graphics. Text uses `Brand.quietText` (AA on Search's backgrounds); bar fills
-/// meet 3:1 on them and on the selected row (docs/search.md "Usage" has the ratios).
-enum UsageStyle {
-    /// A context bar's fill below the limit: 3.95:1 on white, 3.35:1 on the selected row (light);
-    /// 5.92:1 and 3.97:1 (dark).
-    static let fill = adaptive(light: 0x808080, dark: 0x9A9A9A, lightHigh: 0x5E5E5E, darkHigh: 0xBDBDBD)
-
-    static func adaptive(light: Int, dark: Int, lightHigh: Int, darkHigh: Int) -> NSColor {
-        func rgb(_ v: Int) -> NSColor {
-            NSColor(srgbRed: CGFloat((v >> 16) & 255) / 255, green: CGFloat((v >> 8) & 255) / 255, blue: CGFloat(v & 255) / 255, alpha: 1)
-        }
-        return NSColor(name: nil) { a in
-            switch a.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua]) {
-            case .darkAqua?: return rgb(dark)
-            case .accessibilityHighContrastAqua?: return rgb(lightHigh)
-            case .accessibilityHighContrastDarkAqua?: return rgb(darkHigh)
-            default: return rgb(light)
-            }
-        }
-    }
-}
+// Colours for the usage graphics live in `UsageStyle` (UsageSections.swift), shared with the Usage window.
+// Text uses `Brand.quietText` (AA on Search's backgrounds); bar fills meet 3:1 on them and on the selected
+// row (docs/search.md "Usage" has the ratios).
 
 extension Color {
     /// Secondary text that meets AA (`Brand.quietText`).

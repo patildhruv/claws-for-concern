@@ -23,8 +23,12 @@ enum UsageStyle {
         }
     }
 
-    /// Secondary text. The system's secondary label is 3.9:1 on white on macOS 27 (black at 50%), under AA.
-    static let secondaryText = Color(nsColor: adaptive(0x666666, 0xA8A8A8, high: (0x474747, 0xC8C8C8)))
+    /// Secondary text: `Brand.quietText`, the one AA grey both windows use. The system's secondary label
+    /// is 3.9:1 on white on macOS 27 (black at 50%), under AA.
+    static let secondaryText = Color(nsColor: Brand.quietText)
+    /// Search's context bar below the limit: 3.95:1 on white, 3.35:1 on the selected row (light);
+    /// 5.92:1 and 3.97:1 (dark).
+    static let fill = adaptive(0x808080, 0x9A9A9A, high: (0x5E5E5E, 0xBDBDBD))
     /// Cards on the window's background (white, #1E1E1E).
     static let card = Color(nsColor: adaptive(0xF5F5F5, 0x262626, high: (0xF0F0F0, 0x2C2C2C)))
     static let cardEdge = Color(nsColor: adaptive(0xE3E3E3, 0x353535, high: (0x9A9A9A, 0x8A8A8A)))
