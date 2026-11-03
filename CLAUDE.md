@@ -302,6 +302,27 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   the terminal, which Claws must refuse), `$H --snapshot out.png [--query q] [--appearance light|dark]`
   (offscreen, takes no focus), and `--demo` with any of them.
 
+## Usage (`Sources/Search/Usage*.swift`, `Pricing.swift`, guide: docs/usage.md)
+
+- **`SessionUsage` is the contract** between the reader and Search's panel and the Usage window:
+  change it only by adding fields, and bump `UsageCache.version` with any change to it or to the
+  reader's rules. `UsageStore.load()` (off the main thread, not reentrant) reads only transcripts
+  whose files changed (`UsageCache`, in `~/Library/Caches/<helper ID>/`, never under ~/.claude).
+- **Rules verified on 548 transcripts (2.1.316, 2026-11-03), each a trap the plan fell into:** a
+  reply's lines repeat its usage as it grows, so count each `message.id` once with its **last**
+  line; a fork subagent repeats the parent's replies (the first file owns a reply); `forkedFrom`
+  lines are another session's; workflow agents are in `subagents/workflows/<run>/agent-*.jsonl`,
+  and a run folder can be a link to another session's run (never followed).
+- **Claude Code's `cost-state` is per process**: a resumed process restarts it at zero, and it bills
+  calls no transcript holds. Its figure is used only when current and covering ≥ 99% of the
+  transcript's output and cache reads (`UsageBuilder.covers`, PM decision); else the estimate, "est.".
+- **Prices and windows are dated tables with sources** (`Pricing`, `ContextWindows`); an unknown
+  model gets no estimate (`cost.unpriced`) and no percentage. Re-check both at each release.
+- **Never commit `tools/usage-crosscheck.py`'s output**: it describes your own sessions. It must
+  show exact agreement on every field; estimates within 3% of covering Claude Code figures.
+- Commands: `$H --usage <id prefix>`, `$H --usage-dump` (JSON), both with `--demo`;
+  `tools/usage-crosscheck.py` after `./build.sh --no-install`.
+
 ## Settings, placement, the Dock
 
 - Every preference is a UserDefaults key in `Settings.Key`; the Settings window binds the same keys with

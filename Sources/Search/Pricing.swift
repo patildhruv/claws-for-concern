@@ -107,9 +107,11 @@ enum Pricing {
 }
 
 /// Context window per model, for "context now" as a share. Transcripts never state it, and Claude
-/// Code's status line under-reports on some providers. Checked 2026-11-03 against the claude-api skill
-/// bundled with Claude Code 2.1.316 (models.md) and platform.claude.com's models overview, which list
-/// current models only: older ones (Opus 4.5, Sonnet 4.5, …) are unknown here, so nil.
+/// Code's status line under-reports on some providers. Checked 2026-11-03: current models against the
+/// claude-api skill bundled with Claude Code 2.1.316 (models.md) and platform.claude.com's models
+/// overview; Opus 4.5, Sonnet 4.5 and Haiku 4.5 against their own pages there
+/// (docs/en/models/<model>/overview: "Context window: 200K tokens"). Retired models have no page any
+/// more (Opus 4.1 and 4, Sonnet 4, the 3.x line), so they are unknown here: nil.
 enum ContextWindows {
     static let checked = "2026-11-03"
     /// Where "near the limit" starts for a model with no known window (the client's choice, plan-1.4).
@@ -122,7 +124,7 @@ enum ContextWindows {
         "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000, "claude-opus-4-6": 1_000_000,
         "claude-sonnet-5-5": 1_000_000, "claude-sonnet-5": 1_000_000, "claude-sonnet-4-6": 1_000_000,
         "claude-haiku-5-5": 1_000_000,
-        "claude-haiku-4-5": 200_000,
+        "claude-opus-4-5": 200_000, "claude-sonnet-4-5": 200_000, "claude-haiku-4-5": 200_000,
     ]
 
     static func size(for model: String) -> Int? { Pricing.key(for: model).flatMap { table[$0] } }
