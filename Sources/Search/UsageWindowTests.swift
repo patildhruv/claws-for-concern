@@ -47,9 +47,10 @@ enum UsageWindowTests {
         out.append(("rate: Frankfurter's answer parsed, rows with another base, an unknown currency, a bad rate or date dropped",
                     parsed == ["INR": .init(perUSD: 94.94, date: "2026-11-02"), "EUR": .init(perUSD: 0.89, date: "2026-11-03")]
                     && Frankfurter.parse(Data("<html>".utf8), codes: codes) == nil && Frankfurter.parse(Data("[]".utf8), codes: codes) == nil))
-        out.append(("rate: one HTTPS request for every offered currency against the dollar",
+        out.append(("rate: one HTTPS request for every offered currency against the dollar, the same headers for everyone",
                     Frankfurter.url().absoluteString == "https://api.frankfurter.dev/v2/rates?base=USD&quotes="
-                    + Currencies.offered.map(\.code).sorted().joined(separator: ",")))
+                    + Currencies.offered.map(\.code).sorted().joined(separator: ",")
+                    && Frankfurter.headers == ["User-Agent": "ClawsSearch", "Accept": "application/json", "Accept-Language": "en"]))
 
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "Asia/Kolkata")!

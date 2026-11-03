@@ -168,11 +168,16 @@ enum Frankfurter {
         let description: String
     }
 
-    /// One GET, no cookies, no cache on disk, our own short user agent.
+    /// The request's headers, the same for everyone: URLSession would otherwise send your languages
+    /// (Accept-Language) and a user agent naming this Mac's macOS and CFNetwork versions. It adds Host,
+    /// Accept-Encoding and Connection itself (checked against a local listener, 2026-11-03).
+    static let headers = ["User-Agent": "ClawsSearch", "Accept": "application/json", "Accept-Language": "en"]
+
+    /// One GET, no cookies, no cache on disk, fixed headers.
     @Sendable static func fetch(_ codes: [String]) async throws -> [String: RateTable.Rate] {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
-        config.httpAdditionalHeaders = ["User-Agent": "ClawsSearch", "Accept": "application/json"]
+        config.httpAdditionalHeaders = headers
         let session = URLSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(from: url(codes: codes))
