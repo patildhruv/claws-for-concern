@@ -34,7 +34,7 @@
 | `Sources/Search/Brand.swift` | Compiled into the app and the helper: `PixelCrab` (our own crab: menu bar, stand-in sprite, Search's empty states), `Brand` (clay and ink, text and fill shades that meet WCAG AA, the thought-bubble fill and stroke) |
 | `Sources/Search/Demo.swift` | `--demo`: 12 made-up sessions written to a temporary home that `Paths.home` points at; nothing of yours is read, nothing is resumed |
 | `Sources/Search/ResumeClient.swift` | The helper's side of a resume: `PendingResumes` (replies and timeouts, pure), `ResumeClient` (sends with the launch nonce, clipboard fallback, `settle` before quitting) |
-| `Sources/Search/App.swift` | The helper's `@main`: the window ("Search Sessions") and its menus, About box, quit on close; CLI `--search`, `--resume`, `--demo`; `--snapshot` (offscreen, as the key window) |
+| `Sources/Search/App.swift` | The helper's `@main`: the window ("Search Sessions") and its menus, About box, quit on close; CLI `--search`, `--resume`, `--usage`, `--usage-dump` (UsageCLI.swift), `--demo`; `--snapshot` (offscreen, as the key window) |
 | `Sources/Search/Model.swift` | `Scope`, `Message`, `Session` (name, folder, resume command, `canResume`/`whyNotResumable`), `ProjectDirs.resolve` (disk decode), `Paths` (privacy-protected folders, symlinks read with lstat), `Shell.quote` |
 | `Sources/Search/Loader.swift` | `SessionStore`: finds transcripts, re-parses only changed files, in parallel; lenient `Record`/`Content`/`Block` decoding, `FlatStrings` for tool inputs, `SessionBuilder` (name and folder rules), `Prompts` (first-prompt naming) |
 | `Sources/Search/Tokenizer.swift` | UTF-8 word tokenizer for the index and highlighting |
@@ -43,7 +43,16 @@
 | `Sources/Search/AppModel.swift` | The window's state: refresh, debounced background search, previews, selection; Return waits for fresh results; resume (through `ResumeClient`) and copy actions |
 | `Sources/Search/Views.swift` | Split view, results list (clay `SelectionBackground`), detail pane, `CrabThought` (empty states), `NSSearchField` wrapper (arrows move the selection, Return resumes, Esc clears) |
 | `Sources/Search/SelfTest.swift` | The helper's `--selftest`: unit checks plus searches picked from the real transcripts |
+| `Sources/Search/Usage.swift` | `SessionUsage` (the contract: tokens, context, compactions, cost and its source, turns, tools, subagents, API errors, days, lines; derived figures for the screens), `UsageStore` (every session's figures; changed sessions read in batches, every file in pieces at once) |
+| `Sources/Search/UsageBuilder.swift` | `UsageBuilder`: folds a session's records into a `SessionUsage` (each reply once, last line wins, a reply owned by its first file; context curve; turns; tool time; days and hours; cost per reply; `covers`, when Claude Code's figure is used) |
+| `Sources/Search/UsageReader.swift` | `UsageReader`: subagent and workflow agent files (links not followed), byte needles, pieces of whole lines into `Event`s, `fold`; `Timestamp` (by hand); `UsageLine` (lenient decoding: numbers as strings, `modelUsage` as a string, Edit/Write diffs and inputs) |
+| `Sources/Search/UsageCache.swift` | `UsageCache`: the figures on disk in the helper's cache folder, keyed by path, size and mtime of each file, versioned by format, price table and time zone; `Calendar.usage` |
+| `Sources/Search/Pricing.swift` | `Pricing` (API prices per model with date and sources, cache multipliers, Haiku 5.5's long-prompt card, fast mode, US-only, web search) and `ContextWindows` |
+| `Sources/Search/DemoUsage.swift` | `--demo`'s usage figures: a spec per made-up session played through `UsageBuilder` |
+| `Sources/Search/UsageCLI.swift` | `--usage <id prefix>` (readable) and `--usage-dump` (JSON for the cross-check) |
+| `Sources/Search/UsageTests.swift` | The reader's self-test on made-up transcripts, the tables, the cache, the demo figures; invariants and timings on your own transcripts |
 | `Sources/Search/Info.plist` | The helper's bundle (build.sh adds the app's version) |
 | `tools/make-icon.swift` | Draws `Resources/AppIcon.icns`, and `SearchIcon.icns` for the helper with `search` |
+| `tools/usage-crosscheck.py` | An independent Python reading of every transcript, compared field by field with `--usage-dump`; estimates against Claude Code's own figures (output never committed) |
 | `tools/make-readme-media.sh` | Renders `docs/media/*` (hero shots, bubble close-ups, demo GIF, Search on demo data) |
 | `build.sh` | Compiles the app, the hook and the search helper, bundles, signs inside out, installs |

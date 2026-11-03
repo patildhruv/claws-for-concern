@@ -42,10 +42,11 @@ enum UsageTests {
               && Pricing.key(for: "claude-opus-4-20250514") == "claude-opus-4"
               && Pricing.key(for: "<synthetic>") == nil)
         check("price: an unknown model has none", Pricing.cost(model: "claude-3-7-sonnet-20250219", t) == nil)
-        check("context window: 1M for Opus 5.5, 200K for Haiku 4.5 (dated ID), none for an unknown model",
+        check("context window: 1M for Opus 5.5, 200K for Haiku 4.5 (dated ID) and Opus 4.5, none for a retired model",
               ContextWindows.size(for: "claude-opus-5-5") == 1_000_000
               && ContextWindows.size(for: "claude-haiku-4-5-20251001") == 200_000
-              && ContextWindows.size(for: "claude-opus-4-5") == nil)
+              && ContextWindows.size(for: "claude-opus-4-5-20251101") == 200_000
+              && ContextWindows.size(for: "claude-opus-4-1-20250805") == nil)
 
         // MARK: Small pieces
         let stamps = ["2026-11-02T10:00:00.000Z", "2026-11-02T10:00:00Z", "1999-12-31T23:59:59.999Z", "2024-02-29T12:30:05.5Z"]
@@ -141,10 +142,14 @@ enum UsageTests {
         write(workflow, to: dir.appendingPathComponent(id1 + "/subagents/workflows/wf_1/agent-w1.jsonl"))
         write(journal, to: dir.appendingPathComponent(id1 + "/subagents/workflows/wf_1/journal.jsonl"))
         fm.createFile(atPath: dir.appendingPathComponent(id1 + "/subagents/agent-a1.meta.json").path, contents: Data("{}".utf8))
+        // A resumed session's link to the run of the session that started it: its agents count there.
+        let elsewhereRun = base.appendingPathComponent("other-session/subagents/workflows/wf_2")
+        write(workflow, to: elsewhereRun.appendingPathComponent("agent-w2.jsonl"))
+        try? fm.createSymbolicLink(at: dir.appendingPathComponent(id1 + "/subagents/workflows/wf_2"), withDestinationURL: elsewhereRun)
 
         let file1 = dir.appendingPathComponent(id1 + ".jsonl")
         let subs = UsageReader.subagentFiles(for: file1)
-        check("subagents: Agent calls and workflow agents, not journals or meta files",
+        check("subagents: Agent calls and workflow agents, not journals, meta files or linked runs",
               subs.map(\.lastPathComponent) == ["agent-a1.jsonl", "agent-w1.jsonl"], "\(subs.map(\.lastPathComponent))")
         let u = UsageReader.read(transcript: file1, subagents: subs, projectDir: dir.lastPathComponent, calendar: utc)
         check("replies: each message.id once, a fork's copies and forked lines left out", u.replies == 6, "\(u.replies)")

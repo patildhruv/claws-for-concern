@@ -250,6 +250,9 @@ final class UsageStore: @unchecked Sendable {
         byPath[file.path] ?? byID[file.deletingPathExtension().lastPathComponent]
     }
 
+    /// Every transcript's figures by its path, as of the last `load()`; read on the thread that called it.
+    var byTranscript: [String: SessionUsage] { byPath }
+
     init(root: URL = URL(fileURLWithPath: Paths.home).appendingPathComponent(".claude/projects", isDirectory: true),
          cache: UsageCache? = UsageCache()) {
         self.root = root
@@ -260,7 +263,7 @@ final class UsageStore: @unchecked Sendable {
     func load() -> [String: SessionUsage] {
         if Demo.active { byID = Demo.usage; return byID }
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey, .isSymbolicLinkKey]
         func list(_ dir: URL) -> [URL] {
             (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
         }
