@@ -138,7 +138,7 @@ struct UsageReport {
 
     struct Series: Equatable {
         var name: String
-        /// 0…4 for the five projects that cost most over all time; nil for "Other projects".
+        /// 0…4 for the five projects that cost most in the range; nil for "Other projects".
         var slot: Int?
     }
 
@@ -200,13 +200,17 @@ struct UsageReport {
             if let f = info[u.sessionID]?.cwd ?? u.folder { folders[u.projectDir] = f }
         }
         let names = projectNames(keys: Set(usage.values.map(\.projectDir)), folders: folders)
-        // Colours follow the project, never its rank in a filtered view: the five that cost most over
-        // all time keep their slots whatever the filters show.
-        var allTime: [String: Double] = [:]
-        for u in usage.values { allTime[u.projectDir, default: 0] += u.cost.usd ?? 0 }
-        let ranked = allTime.sorted { ($0.value, names[$1.key] ?? "") > ($1.value, names[$0.key] ?? "") }.map(\.key)
+        // Colours: the five projects that cost most in the range get one each. Project, model and find
+        // never repaint them (they rank every session in the range); a different range may, as its
+        // costliest projects differ (ranked over all time, a 30-day chart on real data was mostly grey).
+        var inRangeCost: [String: Double] = [:]
+        for u in usage.values {
+            let c = from.map { f in u.days.filter { $0.date >= f }.compactMap { u.cost(of: $0) }.reduce(0, +) } ?? (u.cost.usd ?? 0)
+            inRangeCost[u.projectDir, default: 0] += c
+        }
+        let ranked = inRangeCost.sorted { ($0.value, names[$1.key] ?? "") > ($1.value, names[$0.key] ?? "") }.map(\.key)
         var slot: [String: Int] = [:]
-        for (i, k) in ranked.prefix(5).enumerated() where (allTime[k] ?? 0) > 0 { slot[k] = i }
+        for (i, k) in ranked.prefix(5).enumerated() where (inRangeCost[k] ?? 0) > 0 { slot[k] = i }
         r.allProjects = names.map { (key: $0.key, name: $0.value) }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         var modelCost: [String: Double] = [:]
         for u in usage.values {
@@ -416,11 +420,15 @@ struct UsageReport {
     }
 
     /// The last part of each project's folder; the last two parts where two projects share one.
-    static func projectNames(keys: Set<String>, folders: [String: String]) -> [String: String] {
+    /// Your home folder is "~", not your account name.
+    static func projectNames(keys: Set<String>, folders: [String: String], home: String = Paths.home) -> [String: String] {
         func parts(_ k: String) -> [String] { (folders[k] ?? "").split(separator: "/").map(String.init) }
         var byLeaf: [String: [String]] = [:]
-        for k in keys { byLeaf[parts(k).last ?? k, default: []].append(k) }
         var out: [String: String] = [:]
+        for k in keys {
+            if folders[k] == home { out[k] = "~"; continue }
+            byLeaf[parts(k).last ?? k, default: []].append(k)
+        }
         for (leaf, ks) in byLeaf {
             for k in ks {
                 let p = parts(k)

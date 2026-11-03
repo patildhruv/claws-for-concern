@@ -118,6 +118,8 @@ struct UsageWindow: View {
                 ForEach(vm.report.allProjects, id: \.key) { p in Text(p.name).tag(Optional(p.key)) }
             }
             .pickerStyle(.menu)
+            // A pop-up is as wide as its longest item: real project names pushed the rest into overflow.
+            .frame(width: 150)
             .help("Only one project")
 
             Picker("Model", selection: $vm.filter.model) {
@@ -126,6 +128,7 @@ struct UsageWindow: View {
                 ForEach(vm.report.allModels, id: \.self) { m in Text(m).tag(Optional(m)) }
             }
             .pickerStyle(.menu)
+            .frame(width: 130)
             .help("Only sessions in which this model replied")
 
             CurrencyMenu()

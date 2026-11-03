@@ -134,7 +134,9 @@ extension UsageRow {
     }
 
     /// "+120 −8", "+120", "−8", "0"; a side that is zero is left out.
-    var linesText: String { UsageRow.lines(linesAdded, linesRemoved) + (linesEstimate ? " est." : "") }
+    var linesText: String {
+        UsageRow.lines(linesAdded, linesRemoved) + (linesEstimate && linesAdded + linesRemoved > 0 ? " est." : "")
+    }
 
     static func lines(_ added: Int, _ removed: Int) -> String {
         let parts = (added > 0 ? ["+" + added.formatted(.number)] : []) + (removed > 0 ? ["−" + removed.formatted(.number)] : [])
@@ -527,7 +529,7 @@ struct AllSessionsSection: View {
                 .contentShape(Rectangle())
                 .help("\(r.title)\n\(r.folder)")
             }
-            .width(min: 200, ideal: 250)
+            .width(min: 200, ideal: 232)
             TableColumn("Project", value: \UsageRow.projectName) { r in Text(r.projectName).lineLimit(1) }
                 .width(min: 70, ideal: 104)
             TableColumn("Last active", value: \UsageRow.lastActiveKey) { r in
@@ -543,7 +545,7 @@ struct AllSessionsSection: View {
             TableColumn("Cost", value: \UsageRow.costKey) { r in
                 Text(r.costText(usage)).monospacedDigit().lineLimit(1).frame(maxWidth: .infinity, alignment: .trailing).help(r.costHelp)
             }
-            .width(min: 86, ideal: 150)
+            .width(min: 86, ideal: 140)
             TableColumn("Written", value: \UsageRow.written) { r in
                 Text(UsageFormat.tokens(r.written)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
                     .help("\(r.written.formatted(.number)) output tokens")
@@ -557,7 +559,7 @@ struct AllSessionsSection: View {
                 Text(r.linesText).monospacedDigit().lineLimit(1).frame(maxWidth: .infinity, alignment: .trailing)
                     .help(r.linesEstimate ? "Counted here from Edit and Write calls (est.)" : "Claude Code's own count")
             }
-            .width(min: 90, ideal: 108)
+            .width(min: 90, ideal: 136)
         }
         .contextMenu(forSelectionType: String.self) { ids in
             if let id = ids.first { RowActions(id: id, open: open) }

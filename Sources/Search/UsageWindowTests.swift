@@ -237,6 +237,13 @@ enum UsageWindowTests {
         out.append(("projects: named by their folder, by two parts where two share a name",
                     ever.rows.first { $0.id == a }?.projectName == "p/alpha" && ever.rows.first { $0.id == b }?.projectName == "q/alpha"
                     && ever.rows.first { $0.id == c }?.projectName == "gamma"))
+        out.append(("projects: your home folder is ~, not your account name",
+                    UsageReport.projectNames(keys: ["-h-me", "-h-me-x"], folders: ["-h-me": "/h/me", "-h-me-x": "/h/me/x"], home: "/h/me")
+                    == ["-h-me": "~", "-h-me-x": "x"]))
+        let gamma = ever.projects.first { $0.key == "-p-gamma" }?.slot
+        out.append(("colours: the range's costliest projects; a project filter never repaints one",
+                    ever.projects.first?.slot == 0 && gamma == 1
+                    && build(UsageFilter(range: .all, project: "-p-gamma")).projects.first?.slot == gamma))
         out.append(("filters: project, model and find", build(UsageFilter(range: .all, project: "-q-alpha")).rows.map(\.id) == [b]
                     && build(UsageFilter(range: .all, model: "Haiku 4.5")).rows.map(\.id) == [a]
                     && build(UsageFilter(range: .all, find: "sum")).rows.map(\.id) == [a]
