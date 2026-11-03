@@ -313,6 +313,12 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   line; a fork subagent repeats the parent's replies (the first file owns a reply); `forkedFrom`
   lines are another session's; workflow agents are in `subagents/workflows/<run>/agent-*.jsonl`,
   and a run folder can be a link to another session's run (never followed).
+- **After the 2026-11-03 review** (`UsageTests.review`, docs/usage.md "Rules after the review"):
+  lines only from successful Edit/Write calls, each call once; tool time never a question or plan
+  and clipped to the turns' working time; turns one by one (record, else estimate); a linked
+  transcript read through its target, an ID filed twice read as one conversation; **no input may
+  trap**: numbers through `lenientNumber`/`lenientCount` (finite, 0…1e12), dates 2020–2100, sums
+  saturating.
 - **Claude Code's `cost-state` is per process**: a resumed process restarts it at zero, and it bills
   calls no transcript holds. Its figure is used only when current and covering ≥ 99% of the
   transcript's output and cache reads (`UsageBuilder.covers`, PM decision); else the estimate, "est.".

@@ -2,12 +2,13 @@ import Foundation
 
 /// Each session's figures on disk, so a reopen reads only transcripts that changed: one file in the
 /// helper's own cache folder (`~/Library/Caches/<helper bundle ID>/usage.json`, never under ~/.claude),
-/// keyed by transcript path, with the size and modification time of the transcript and each of its
-/// subagent files. Anything else that changes the figures starts it afresh: the format, the price
-/// table and the time zone (days and hours are local).
+/// keyed by the real transcript's path (or "merged <id>" for an ID filed twice), with the size and
+/// modification time of each file read. Anything else that changes the figures starts it afresh: the
+/// format, the price table and the time zone (days and hours are local).
 struct UsageCache {
-    /// Bump when `SessionUsage` or the reader's rules change.
-    static let version = 1
+    /// Bump when `SessionUsage` or the reader's rules change. 2: failed edits, copied diffs, tool time
+    /// without waits, turns one by one, linked and copied transcripts (2026-11-03 review).
+    static let version = 2
 
     struct Stamp: Codable, Equatable {
         var path: String
@@ -34,6 +35,11 @@ struct UsageCache {
         if let dir = ProcessInfo.processInfo.environment["CLAWS_SEARCH_CACHE"], !dir.isEmpty {
             return URL(fileURLWithPath: dir, isDirectory: true)
         }
+        return defaultFolder
+    }
+
+    /// Where it lives unless moved.
+    static var defaultFolder: URL {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Caches", isDirectory: true)
         return caches.appendingPathComponent(Bundle.main.bundleIdentifier ?? "io.github.patildhruv.claws-for-concern.search",

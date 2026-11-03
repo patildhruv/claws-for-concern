@@ -102,8 +102,9 @@ enum UsageTests {
             // Claude Code's own diff wins over the input's estimate (which would say +3 −2).
             result("2026-11-02T10:00:22.000Z", ["tu3"], extra: ["toolUseResult": ["filePath": "f", "originalFile": "a\nb\nc",
                                                                                   "structuredPatch": [["lines": [" a", "-b", "+B", " c", "+d"]]]]]),
-            // No result written for this Write: its input counts (a final newline starts a line).
+            // A result with no diff (as subagents write them): the input counts (a final newline starts a line).
             reply("msg_C", "2026-11-02T10:00:30.000Z", usage(3, 50, 3_500, 200), [tool("tu4", "Write", ["file_path": "g", "content": "x\ny\n"])]),
+            result("2026-11-02T10:00:31.000Z", ["tu4"]),
             ["type": "system", "subtype": "turn_duration", "durationMs": 45_000, "timestamp": "2026-11-02T10:00:35.000Z"],
             ["type": "system", "subtype": "compact_boundary", "timestamp": "2026-11-02T10:01:00.000Z", "content": "Conversation compacted",
              "compactMetadata": ["trigger": "auto", "preTokens": 3_753, "postTokens": 900, "cumulativeDroppedTokens": 2_853, "durationMs": 12_000]],
@@ -169,7 +170,7 @@ enum UsageTests {
                                               postTokens: 900, droppedTokens: 2_853, seconds: 12)], "\(u.context.compactions)")
         check("turns: Claude Code's durations, main thread only",
               u.turns == .init(count: 2, seconds: 105, longestSeconds: 60, source: .claudeCode), "\(u.turns)")
-        check("tool time: main thread, overlaps once, a call with no result left out", u.toolSeconds == 13, "\(u.toolSeconds)")
+        check("tool time: main thread, overlaps once", u.toolSeconds == 14, "\(u.toolSeconds)")
         check("tools: each call once, subagents included",
               u.tools == ["Read": 1, "Bash": 1, "Edit": 1, "Write": 1, "Grep": 1], "\(u.tools)")
         check("API errors: once per message, kind, status, first line",
@@ -276,7 +277,8 @@ enum UsageTests {
         check("cache: another time zone starts afresh",
               !UsageCache(url: cacheURL).load().isEmpty && UsageCache(url: cacheURL, timeZone: elsewhere).load().isEmpty)
         check("cache: in the helper's own cache folder, never under ~/.claude",
-              !UsageCache.folder.path.hasPrefix(Paths.realHome + "/.claude") && UsageCache.folder.path.contains("/Library/Caches/"))
+              !UsageCache.defaultFolder.path.hasPrefix(Paths.realHome + "/.claude") && UsageCache.defaultFolder.path.contains("/Library/Caches/"))
+        out += review()
 
         // MARK: The demo
         let root = Demo.activate()
@@ -353,5 +355,290 @@ enum UsageTests {
     private static func write(_ lines: [Any], to url: URL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: url.path, contents: Data((lines.map(json).joined(separator: "\n") + "\n").utf8))
+    }
+}
+
+extension UsageTests {
+    /// The independent review of 2026-11-03: each finding as made-up transcripts (cases A to J are the
+    /// reviewer's own), then lines no transcript should hold, at random.
+    static func review() -> [(String, Bool)] {
+        var out: [(String, Bool)] = []
+        func check(_ name: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {
+            out.append((name + (ok ? "" : "  [\(detail())]"), ok))
+        }
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("claws-usage-review-\(getpid())", isDirectory: true)
+        defer { try? fm.removeItem(at: base) }
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let sid = "11111111-2222-4333-8444-555555555555"
+        func u(_ i: Int, _ o: Int, _ r: Int, _ w: Int) -> [String: Any] {
+            ["input_tokens": i, "output_tokens": o, "cache_read_input_tokens": r, "cache_creation_input_tokens": w,
+             "cache_creation": ["ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": w]]
+        }
+        func asst(_ id: String, _ ts: String, _ usage: [String: Any], _ content: [[String: Any]], _ extra: [String: Any] = [:]) -> [String: Any] {
+            ["type": "assistant", "timestamp": ts, "cwd": "/tmp/proj", "sessionId": sid, "uuid": "u-\(id)-\(ts)",
+             "message": ["id": id, "model": "claude-opus-4-6", "role": "assistant", "usage": usage, "content": content]]
+                .merging(extra) { $1 }
+        }
+        func prompt(_ ts: String, _ text: String = "hello", uuid: String? = nil) -> [String: Any] {
+            ["type": "user", "timestamp": ts, "cwd": "/tmp/proj", "uuid": uuid ?? "p-\(ts)", "message": ["role": "user", "content": text]]
+        }
+        func result(_ ts: String, _ id: String, _ tur: Any? = nil, error: Bool = false, text: String = "ok") -> [String: Any] {
+            var d: [String: Any] = ["type": "user", "timestamp": ts, "cwd": "/tmp/proj", "uuid": "r-\(id)-\(ts)",
+                                    "message": ["role": "user", "content": [["type": "tool_result", "tool_use_id": id, "content": text,
+                                                                             "is_error": error]]]]
+            if let tur { d["toolUseResult"] = tur }
+            return d
+        }
+        func edit(_ id: String, _ old: String, _ new: String) -> [String: Any] {
+            ["type": "tool_use", "id": id, "name": "Edit", "input": ["file_path": "/tmp/proj/a.txt", "old_string": old, "new_string": new]]
+        }
+        func wr(_ id: String, _ content: String) -> [String: Any] {
+            ["type": "tool_use", "id": id, "name": "Write", "input": ["file_path": "/tmp/proj/b.txt", "content": content]]
+        }
+        func call(_ id: String, _ name: String) -> [String: Any] { ["type": "tool_use", "id": id, "name": name, "input": [:] as [String: Any]] }
+        func text(_ s: String) -> [[String: Any]] { [["type": "text", "text": s]] }
+        func turn(_ ts: String, _ ms: Any) -> [String: Any] {
+            ["type": "system", "subtype": "turn_duration", "timestamp": ts, "durationMs": ms, "uuid": "t-\(ts)"]
+        }
+        var n = 0
+        func read(_ main: [Any], _ subagents: [[Any]] = [], calendar: Calendar? = nil) -> SessionUsage {
+            n += 1
+            let file = base.appendingPathComponent("s\(n)/-tmp-proj/\(sid).jsonl")
+            write(main, to: file)
+            for (i, s) in subagents.enumerated() {
+                write(s, to: file.deletingPathExtension().appendingPathComponent("subagents/agent-a\(i).jsonl"))
+            }
+            return UsageReader.read(transcript: file, subagents: UsageReader.subagentFiles(for: file), projectDir: "-tmp-proj",
+                                    calendar: calendar ?? utc)
+        }
+        let t = { (s: String) in "2026-11-02T\(s).000Z" }
+
+        // 1. Failed and rejected Edit and Write calls change nothing.
+        let a = read([prompt(t("10:00:00")),
+                      asst("msg_1", t("10:00:05"), u(10, 50, 0, 1_000), [edit("toolu_1", "a\nb", "x\ny\nz")]),
+                      result(t("10:00:06"), "toolu_1", "Error: String to replace not found in file.", error: true),
+                      asst("msg_2", t("10:00:10"), u(10, 50, 1_000, 10), [wr("toolu_2", "1\n2\n3\n4\n5\n")]),
+                      result(t("10:00:20"), "toolu_2", "User rejected tool use", error: true),
+                      asst("msg_3", t("10:00:25"), u(10, 50, 1_000, 10), [wr("toolu_3", "1\n")]),
+                      result(t("10:00:26"), "toolu_3", "Error: file was modified"),           // text only, no is_error
+                      asst("msg_4", t("10:00:30"), u(10, 50, 1_000, 10), [edit("toolu_4", "p", "q\nr")]),
+                      result(t("10:00:31"), "toolu_4", error: true),                           // is_error, no text
+                      asst("msg_5", t("10:00:35"), u(10, 50, 1_000, 10), [edit("toolu_5", "s", "t")])])   // no result
+        check("review 1: failed, rejected or unanswered Edit and Write calls count no lines (case A)",
+              a.lines == .init(added: 0, removed: 0, source: .estimate) && a.days.allSatisfy { $0.linesAdded == 0 }, "\(a.lines)")
+
+        // 2. A forked subagent's copy of the parent's Edit and its result count once.
+        let patch: [String: Any] = ["filePath": "/tmp/proj/a.txt", "structuredPatch": [["oldStart": 1, "lines": ["-old", "+new"]]]]
+        let parent: [Any] = [prompt(t("10:00:00")), asst("msg_1", t("10:00:05"), u(10, 50, 0, 1_000), [edit("toolu_1", "old", "new")]),
+                             result(t("10:00:06"), "toolu_1", patch)]
+        let b = read(parent + [asst("msg_2", t("10:00:30"), u(10, 20, 1_000, 10), text("done"))],
+                     [parent.dropFirst().map { ($0 as! [String: Any]).merging(["isSidechain": true]) { $1 } }
+                      + [asst("msg_s1", t("10:00:20"), u(5, 30, 1_000, 10), text("sub"))]])
+        check("review 2: a forked subagent's copied diff counts once, by its call (case B)",
+              b.lines.added == 1 && b.lines.removed == 1 && b.replies == 3, "\(b.lines) \(b.replies)")
+
+        // 3. Tool time: never a question or a plan, and only while Claude worked.
+        let wait = read([prompt(t("10:00:00")),
+                         asst("msg_1", t("10:00:05"), u(1, 1, 0, 10), [call("tq", "AskUserQuestion")]),
+                         result(t("10:30:05"), "tq"),                                   // 30 min for your answer
+                         asst("msg_2", t("10:30:10"), u(1, 1, 0, 10), [call("tb", "Bash")]),
+                         result(t("10:40:10"), "tb"),                                   // a permission prompt, then the run
+                         asst("msg_3", t("10:40:15"), u(1, 1, 0, 10), text("done")),
+                         turn(t("10:40:15"), 60_000)])
+        check("review 3: tool time leaves out questions and plans, and stays within Claude's working time",
+              wait.toolSeconds == 55 && wait.toolSeconds <= wait.turns.seconds && wait.turns.seconds == 60,
+              "tool \(wait.toolSeconds) worked \(wait.turns.seconds)")
+
+        // 4. No input traps (cases C, C2, C3), and impossible values count as missing.
+        let huge = read([prompt(t("10:00:00")),
+                         #"{"type":"assistant","timestamp":"2026-11-02T10:00:05.000Z","message":{"id":"msg_1","model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":1e19}}}"#,
+                         #"{"type":"assistant","timestamp":"2026-11-02T10:00:06.000Z","message":{"id":"msg_2","model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":"inf","cache_read_input_tokens":"nan","cache_creation_input_tokens":-5}}}"#,
+                         #"{"type":"system","subtype":"compact_boundary","timestamp":"2026-11-02T10:00:07.000Z","compactMetadata":{"trigger":"auto","preTokens":1e20,"postTokens":"1e400","durationMs":"-inf"}}"#,
+                         #"{"type":"assistant","timestamp":"2026-11-02T10:00:08.000Z","isApiErrorMessage":true,"error":"x","apiErrorStatus":1e30,"message":{"id":"e1","model":"<synthetic>"}}"#,
+                         #"{"type":"cost-state","totalCostUSD":"1e400","totalLinesAdded":1e300,"totalLinesRemoved":-1,"modelUsage":{"m":{"outputTokens":1e300,"cacheReadInputTokens":"inf"}}}"#,
+                         #"{"type":"system","subtype":"turn_duration","timestamp":"2026-11-02T10:00:09.000Z","durationMs":1e300}"#])
+        check("review 4: numbers too big, negative, inf or nan are missing, and nothing traps (cases C, C2, C3)",
+              huge.tokens == .init(output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, input: 2)
+              && huge.context.compactions.first?.preTokens == nil && huge.context.compactions.first?.seconds == nil
+              && huge.apiErrors.first?.status == nil && huge.cost.claudeCodeUSD == nil, "\(huge.tokens)")
+        check("review 4: sums saturate instead of trapping",
+              Int.max.addingSaturating(1) == .max && Int.min.addingSaturating(-1) == .min && Int(saturating: .infinity) == .max
+              && Int(saturating: .nan) == 0 && (SessionUsage.Tokens(output: .max) + .init(output: 5)).output == .max)
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let fuzzed = fuzz(seed: 7, lines: 3_000, utc)
+        check("review 4: 3,000 random lines (wrong types, huge and odd numbers, corrupt dates, cut lines) read without a trap",
+              fuzzed.allSatisfy { $0 } && CFAbsoluteTimeGetCurrent() - t0 < 10,
+              String(format: "%.1fs, %@", CFAbsoluteTimeGetCurrent() - t0, "\(fuzzed)"))
+
+        // 5. Turns one by one: Claude Code's record where it wrote one, else an estimate (case I).
+        let mixed = read([prompt(t("10:00:00")), asst("msg_1", t("10:10:00"), u(1, 1, 0, 10), text("a")),
+                          prompt(t("11:00:00")), asst("msg_2", t("11:20:00"), u(1, 1, 0, 10), text("b")),
+                          prompt(t("12:00:00")), asst("msg_3", t("12:01:00"), u(1, 1, 0, 10), text("c")),
+                          turn(t("12:01:00"), 60_000)])
+        check("review 5: a turn without a record is estimated even when others have one (case I)",
+              mixed.turns == .init(count: 3, seconds: 1_860, longestSeconds: 1_200, source: .estimate), "\(mixed.turns)")
+        let queued = read([prompt(t("10:00:00")), asst("msg_1", t("10:05:00"), u(1, 1, 0, 10), text("a")),
+                           prompt(t("10:06:00"), "and also this"), asst("msg_2", t("10:10:00"), u(1, 1, 0, 10), text("b")),
+                           turn(t("10:10:00"), 600_000)])
+        check("review 5: a prompt queued inside a recorded turn adds no time of its own",
+              queued.turns == .init(count: 1, seconds: 600, longestSeconds: 600, source: .claudeCode), "\(queued.turns)")
+        let absurd = read([prompt(t("10:00:00")), asst("msg_1", t("10:00:05"), u(10, 50, 0, 1_000), text("hi")),
+                           turn(t("10:00:06"), 3.6e12),
+                           prompt("9999-12-31T23:59:59.999Z"), asst("msg_2", "9999-12-31T23:59:59.999Z", u(1, 1, 0, 1), text("x"))])
+        check("review 5: an impossible duration or a year-9999 date is ignored, quickly (case D)",
+              absurd.turns == .init(count: 1, seconds: 5, longestSeconds: 5, source: .estimate) && absurd.days.count == 1
+              && absurd.lastActive == Timestamp.parse(t("10:00:05")), "\(absurd.turns) \(absurd.days.map(\.date))")
+
+        // Low: context after a compaction that kept no count; identical writes; errors without a time.
+        let e = read([prompt(t("10:00:00")), asst("msg_1", t("10:00:05"), u(10, 50, 900_000, 1_000), text("hi")),
+                      ["type": "system", "subtype": "compact_boundary", "timestamp": t("10:01:00"),
+                       "compactMetadata": ["trigger": "manual", "preTokens": 901_010]],
+                      ["type": "assistant", "isApiErrorMessage": true, "error": "rate_limit",
+                       "message": ["id": "e9", "model": "<synthetic>", "content": text("API Error")]]])
+        check("review low: a compaction that says nothing of what it kept leaves context now unknown (case E)",
+              e.context.now == nil && e.context.model == "claude-opus-4-6", "\(String(describing: e.context.now))")
+        check("review low: an API error without a time moves neither end of the session",
+              e.apiErrors.count == 1 && e.firstActive == Timestamp.parse(t("10:00:00")), "\(String(describing: e.firstActive))")
+        let same = read([prompt(t("10:00:00")), asst("msg_1", t("10:00:05"), u(10, 50, 0, 1_000), [wr("toolu_1", "1\n2\n3\n")]),
+                         result(t("10:00:06"), "toolu_1", ["type": "update", "filePath": "/tmp/proj/b.txt", "content": "1\n2\n3\n",
+                                                          "structuredPatch": [] as [Any]])])
+        check("review low: writing a file unchanged counts no lines (case J)", same.lines.added == 0 && same.lines.removed == 0,
+              "\(same.lines)")
+        let marks = read([prompt(t("10:00:00")), asst("msg_1", t("10:00:05"), u(10, 50, 0, 1_000), [edit("toolu_1", "a", "b")]),
+                          result(t("10:00:06"), "toolu_1", ["structuredPatch": [["lines": ["-\u{0CBC}x", "+\u{0301}y", " z"]]]])])
+        check("lines: a diff line that starts with a sign and a combining mark still counts (seen in a real diff)",
+              marks.lines.added == 1 && marks.lines.removed == 1, "\(marks.lines)")
+        let cut = read([prompt(t("10:00:00")), asst("msg_1", t("10:00:05"), u(10, 50, 0, 1_000), text("hi")),
+                        #"{"type":"assistant","timestamp":"2026-11-02T10:00:09.000Z","message":{"id":"msg_2","model":"claude-opus-4-6","usage":{"input_tokens":1,"outp"#])
+        check("review low: a line still being written is left out (case H)", cut.replies == 1)
+        var ny = Calendar(identifier: .gregorian)
+        ny.timeZone = TimeZone(identifier: "America/New_York")!
+        let dst = read([prompt("2026-11-01T05:30:00.000Z"), asst("msg_1", "2026-11-01T06:30:00.000Z", u(10, 50, 0, 1_000), text("hi")),
+                        turn("2026-11-01T06:30:00.000Z", 3_600_000),
+                        prompt("2026-11-02T04:30:00.000Z"), asst("msg_2", "2026-11-02T05:30:00.000Z", u(10, 50, 0, 1_000), text("hi")),
+                        turn("2026-11-02T05:30:00.000Z", 3_600_000)], calendar: ny)
+        let nov1 = dst.days.first { $0.date == "2026-11-01" }, nov2 = dst.days.first { $0.date == "2026-11-02" }
+        check("review low: the hour that repeats when clocks go back, and a turn across midnight (case G)",
+              nov1?.workSeconds[1] == 3_600 && nov1?.workSeconds[23] == 1_800 && nov2?.workSeconds[0] == 1_800 && nov2?.weekday == 2,
+              "\(dst.days.map { "\($0.date) \($0.workSeconds.enumerated().filter { $0.element > 0 })" })")
+        var share = SessionUsage(sessionID: "x", projectDir: "y")
+        share.lines = .init(added: 10, removed: 0, source: .claudeCode)
+        share.days = [.init(date: "2026-11-01", weekday: 1, workSeconds: [600] + Array(repeating: 0, count: 23)),
+                      .init(date: "2026-11-02", weekday: 2, workSeconds: [2_400] + Array(repeating: 0, count: 23))]
+        check("review low: Claude Code's lines with none counted per day split as the working time did",
+              share.days.map { share.lines(of: $0).added } == [2, 8], "\(share.days.map { share.lines(of: $0).added })")
+
+        // 6 and 7, through the store: a transcript that is a link, and two diverged copies of one session.
+        let root = base.appendingPathComponent("store/projects", isDirectory: true)
+        let realFile = root.appendingPathComponent("-tmp-proj/\(sid).jsonl")
+        write([prompt(t("10:00:00")), asst("msg_1", t("10:00:05"), u(10, 50, 0, 1_000), text("hi"))], to: realFile)
+        let linkFile = root.appendingPathComponent("-tmp-other/\(sid).jsonl")
+        try? fm.createDirectory(at: linkFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(at: linkFile, withDestinationURL: realFile)
+        let guarded = root.appendingPathComponent("-tmp-guarded/22222222-2222-4333-8444-555555555555.jsonl")
+        try? fm.createDirectory(at: guarded.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(atPath: guarded.path, withDestinationPath: Paths.realHome + "/Documents/never-read.jsonl")
+        let cacheURL = base.appendingPathComponent("store/cache.json")
+        let store = UsageStore(root: root, cache: UsageCache(url: cacheURL))
+        // Listings may spell the temporary folder /private/var/…: find entries by their folder and name.
+        func listed(_ s: UsageStore, _ tail: String) -> SessionUsage? { s.byTranscript.first { $0.key.hasSuffix(tail) }?.value }
+        let once = store.load()
+        check("review 6: a linked transcript is read once, through its target; a link into a protected folder is never followed (case F)",
+              once.count == 1 && store.lastRead == 1 && listed(store, "-tmp-other/\(sid).jsonl") == listed(store, "-tmp-proj/\(sid).jsonl")
+              && listed(store, "-tmp-other/\(sid).jsonl")?.replies == 1 && listed(store, "-tmp-guarded/22222222-2222-4333-8444-555555555555.jsonl") == nil,
+              "\(once.count) read \(store.lastRead) \(store.byTranscript.keys.sorted())")
+        if let h = try? FileHandle(forWritingTo: realFile) {
+            h.seekToEndOfFile()
+            h.write(Data((json(asst("msg_2", t("10:00:09"), u(1, 1, 0, 1), text("more"))) + "\n").utf8))
+            try? h.close()
+        }
+        _ = store.load()
+        check("review 6: the link refreshes when its target changes", listed(store, "-tmp-other/\(sid).jsonl")?.replies == 2)
+
+        let copies = base.appendingPathComponent("copies/projects", isDirectory: true)
+        let shared: [Any] = [prompt(t("09:00:00"), uuid: "p1"), asst("msg_1", t("09:00:05"), u(1, 10, 0, 100), text("a")),
+                             turn(t("09:00:05"), 5_000), asst("msg_2", t("09:00:06"), u(1, 10, 100, 100), text("b"))]
+        write(shared + [prompt(t("10:00:00"), uuid: "p2"), asst("msg_3", t("10:00:05"), u(1, 10, 200, 100), text("c"))],
+              to: copies.appendingPathComponent("-tmp-one/\(sid).jsonl"))
+        write(shared + [prompt(t("11:00:00"), uuid: "p3"), asst("msg_4", t("11:00:05"), u(1, 10, 300, 100), text("d")),
+                        asst("msg_5", t("11:00:09"), u(1, 10, 400, 100), text("e"))],
+              to: copies.appendingPathComponent("-tmp-two/\(sid).jsonl"))
+        let both = UsageStore(root: copies, cache: UsageCache(url: base.appendingPathComponent("copies/cache.json")))
+        let merged = both.load()[sid]
+        let one = listed(both, "-tmp-one/\(sid).jsonl"), two = listed(both, "-tmp-two/\(sid).jsonl")
+        check("review 7: a session filed twice gets figures from both copies, each reply and line once",
+              merged?.replies == 5 && merged?.tokens.output == 50 && merged?.turns.count == 3 && one?.replies == 3 && two?.replies == 4
+              && merged?.context.now == 501 && merged?.context.replies.count == 5,
+              "merged \(merged?.replies ?? -1) turns \(merged?.turns.count ?? -1) now \(merged?.context.now ?? -1)")
+        return out
+    }
+
+    /// Random lines that try every shape a field can take: each must read without a trap, and give
+    /// figures that are finite and not negative.
+    private static func fuzz(seed: UInt64, lines count: Int, _ calendar: Calendar) -> [Bool] {
+        var state = seed
+        func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+        func pick<T>(_ xs: [T]) -> T { xs[Int(next() % UInt64(xs.count))] }
+        let dates = ["2026-11-02T10:00:00.000Z", "2026-11-02T23:59:59.999Z", "9999-12-31T23:59:59.999Z", "0001-01-01T00:00:00Z",
+                     "2026-13-45T25:61:61Z", "2026-11-02", "", "x", "2026-11-02T10:00:00+05:30"]
+        let keys = ["type", "subtype", "timestamp", "uuid", "message", "toolUseResult", "durationMs", "compactMetadata", "totalCostUSD",
+                    "modelUsage", "totalLinesAdded", "isApiErrorMessage", "error", "apiErrorStatus", "forkedFrom", "cwd", "isMeta",
+                    "id", "model", "usage", "content", "input_tokens", "output_tokens", "cache_read_input_tokens",
+                    "cache_creation_input_tokens", "cache_creation", "ephemeral_1h_input_tokens", "tool_use_id", "is_error", "name",
+                    "input", "structuredPatch", "lines", "preTokens", "postTokens", "outputTokens", "cacheReadInputTokens", "old_string",
+                    "new_string"]
+        func value(_ depth: Int) -> Any {
+            switch next() % 14 {
+            case 0: return Int.max
+            case 1: return -1
+            case 2: return 1e19
+            case 3: return 1e300
+            case 4: return pick(["inf", "-inf", "nan", "1e400", "-0", "12abc", " 7 "])
+            case 5: return NSNull()
+            case 6: return next() % 2 == 0
+            case 7: return depth > 2 ? 0 : (0..<Int(next() % 3)).map { _ in value(depth + 1) }
+            case 8:
+                guard depth <= 2 else { return "" }
+                var d: [String: Any] = [:]
+                for _ in 0..<Int(next() % 4) { d[pick(keys)] = value(depth + 1) }
+                return d
+            case 9: return pick(dates)
+            case 10: return Int(next() % 100_000)
+            case 11: return Double(next() % 1_000) / 7
+            default: return pick(["assistant", "user", "system", "tool_use", "tool_result", "text", "Edit", "Write", "create", "+a", "-b"])
+            }
+        }
+        var text = ""
+        for _ in 0..<count {
+            var line: [String: Any] = ["type": pick(["assistant", "user", "system", "cost-state", "attachment"]),
+                                       "timestamp": pick(dates), "subtype": pick(["compact_boundary", "turn_duration", "x"])]
+            line["message"] = ["id": "m\(next() % 50)", "model": pick(["claude-opus-4-6", "<synthetic>", "claude-x"]),
+                               "usage": Dictionary(uniqueKeysWithValues: ["input_tokens", "output_tokens", "cache_read_input_tokens",
+                                                                          "cache_creation_input_tokens"].map { ($0, value(1)) }),
+                               "content": [["type": pick(["tool_use", "tool_result", "text"]), "id": "t\(next() % 30)",
+                                            "tool_use_id": "t\(next() % 30)", "name": pick(["Edit", "Write", "Bash", "AskUserQuestion"]),
+                                            "is_error": value(2), "text": value(2),
+                                            "input": ["old_string": value(2), "new_string": value(2), "content": value(2)]]]]
+            for _ in 0..<Int(next() % 6) { line[pick(keys)] = value(0) }
+            let s = String(decoding: (try? JSONSerialization.data(withJSONObject: line)) ?? Data(), as: UTF8.self)
+            text += (next() % 9 == 0 ? String(s.prefix(Int(next() % UInt64(max(1, s.count))))) : s) + "\n"
+        }
+        let data = Data(text.utf8)
+        let main = (0..<UsageReader.pieces(size: data.count, of: 4_096)).flatMap {
+            UsageReader.events(in: data, piece: $0, last: $0 == UsageReader.pieces(size: data.count, of: 4_096) - 1, subagent: false, size: 4_096)
+        }
+        let sub = UsageReader.events(in: data, piece: 0, last: true, subagent: true)
+        let s = UsageReader.fold(sessionID: "fuzz", projectDir: "-fuzz", files: [main, main, sub], mains: 2, calendar: calendar)
+        let t = s.tokens
+        return [t.output >= 0, t.cacheRead >= 0, t.cacheWrite >= 0, t.input >= 0, s.turns.seconds.isFinite, s.turns.seconds >= 0,
+                s.toolSeconds <= s.turns.seconds + 1e-6, s.days.count < 400, (s.cost.usd ?? 0).isFinite, s.lines.added >= 0]
     }
 }

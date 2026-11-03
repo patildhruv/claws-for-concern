@@ -33,7 +33,8 @@ struct SessionUsage: Codable, Equatable {
     var cost = Cost()
     var turns = Turns()
     /// Main thread: wall-clock time while at least one tool call was running (from each `tool_use` to its
-    /// `tool_result`), so parallel calls are not counted twice.
+    /// `tool_result`), so parallel calls are not counted twice; never a call that waits for you
+    /// (`UsageBuilder.waitingTools`), and only within the turns' working time, so never more than it.
     var toolSeconds: Double = 0
     /// Tool calls by tool name, subagents included, each `tool_use` block once.
     var tools: [String: Int] = [:]
@@ -56,17 +57,20 @@ struct SessionUsage: Codable, Equatable {
 
         var cacheWrite5m: Int { cacheWrite - cacheWrite1h }
         /// What the model read: fresh input plus the cache, read and written.
-        var prompt: Int { input + cacheRead + cacheWrite }
-        var total: Int { prompt + output }
+        var prompt: Int { input.addingSaturating(cacheRead).addingSaturating(cacheWrite) }
+        var total: Int { prompt.addingSaturating(output) }
 
+        /// Sums saturate at `Int.max` rather than trap, whatever a transcript holds.
         mutating func add(_ o: Tokens) {
-            output += o.output; cacheRead += o.cacheRead; cacheWrite += o.cacheWrite
-            cacheWrite1h += o.cacheWrite1h; input += o.input
+            output = output.addingSaturating(o.output); cacheRead = cacheRead.addingSaturating(o.cacheRead)
+            cacheWrite = cacheWrite.addingSaturating(o.cacheWrite); cacheWrite1h = cacheWrite1h.addingSaturating(o.cacheWrite1h)
+            input = input.addingSaturating(o.input)
         }
         static func + (a: Tokens, b: Tokens) -> Tokens { var t = a; t.add(b); return t }
         static func - (a: Tokens, b: Tokens) -> Tokens {
-            Tokens(output: a.output - b.output, cacheRead: a.cacheRead - b.cacheRead, cacheWrite: a.cacheWrite - b.cacheWrite,
-                   cacheWrite1h: a.cacheWrite1h - b.cacheWrite1h, input: a.input - b.input)
+            Tokens(output: a.output.addingSaturating(-b.output), cacheRead: a.cacheRead.addingSaturating(-b.cacheRead),
+                   cacheWrite: a.cacheWrite.addingSaturating(-b.cacheWrite), cacheWrite1h: a.cacheWrite1h.addingSaturating(-b.cacheWrite1h),
+                   input: a.input.addingSaturating(-b.input))
         }
     }
 
@@ -80,7 +84,8 @@ struct SessionUsage: Codable, Equatable {
     }
 
     struct Context: Codable, Equatable {
-        /// Tokens in the main thread's context now: after its last reply, or the compaction after it.
+        /// Tokens in the main thread's context now: after its last reply, or the compaction after it;
+        /// nil when that compaction did not say how much it kept (or there were no replies).
         var now: Int?
         /// The model of the last main-thread reply, the window `now` is measured against.
         var model: String?
@@ -125,7 +130,8 @@ struct SessionUsage: Codable, Equatable {
         /// Claude's working time across turns.
         var seconds: Double = 0
         var longestSeconds: Double = 0
-        /// Claude Code's `turn_duration` records, or worked out from timestamps when it wrote none.
+        /// `.claudeCode` when every turn has Claude Code's `turn_duration`; `.estimate` when any turn
+        /// was worked out from its prompt and last reply (or there were no turns).
         var source: Source = .claudeCode
     }
 
@@ -212,11 +218,18 @@ extension SessionUsage {
     /// session's figure, so a session's days add up to its total (give or take rounding).
     func lines(of day: Day) -> (added: Int, removed: Int) {
         guard lines.source == .claudeCode else { return (day.linesAdded, day.linesRemoved) }
-        func scale(_ v: Int, _ total: Int, _ counted: Int) -> Int {
-            counted > 0 ? Int((Double(v) * Double(total) / Double(counted)).rounded()) : v
+        // Claude Code's total, split as the edits counted here fell; with none counted on any day, as
+        // Claude's working time fell (else its replies, else evenly).
+        func share(_ total: Int, _ own: KeyPath<Day, Int>) -> Int {
+            let weight: (Day) -> Double
+            if days.contains(where: { $0[keyPath: own] > 0 }) { weight = { Double($0[keyPath: own]) } }
+            else if days.contains(where: { $0.workSeconds.reduce(0, +) > 0 }) { weight = { $0.workSeconds.reduce(0, +) } }
+            else if days.contains(where: { $0.replies > 0 }) { weight = { Double($0.replies) } }
+            else { weight = { _ in 1 } }
+            let sum = days.reduce(0.0) { $0 + weight($1) }
+            return sum > 0 ? Int(saturating: (Double(total) * weight(day) / sum).rounded()) : 0
         }
-        let added = days.reduce(0) { $0 + $1.linesAdded }, removed = days.reduce(0) { $0 + $1.linesRemoved }
-        return (scale(day.linesAdded, lines.added, added), scale(day.linesRemoved, lines.removed, removed))
+        return (share(lines.added, \.linesAdded), share(lines.removed, \.linesRemoved))
     }
 
     /// Claude's working seconds by weekday (rows 0…6 = Sunday…Saturday) and local hour (columns 0…23),
@@ -235,10 +248,16 @@ extension SessionUsage {
 /// Every session's usage, keyed by session ID: what Search's panel and the Usage window read. Reads
 /// only transcripts whose files changed since the last call or the last run (`UsageCache`), in
 /// parallel, biggest first. Under `--demo` it is `Demo.usage`, and nothing of yours is read.
+///
+/// A transcript that is a link is read through its target (stamped by the target's size and time), and
+/// not again when the target is listed too. A session ID filed as two real transcripts (copies that may
+/// have diverged) gets figures from all of them, each reply and line once; `byTranscript` keeps each
+/// file's own.
 final class UsageStore: @unchecked Sendable {
     let root: URL
-    let cache: UsageCache?
+    private(set) var cache: UsageCache?
     private var entries: [String: UsageCache.Entry]?
+    private var entriesZone: String?
     /// Transcripts read by the last `load()`: the rest came from the cache.
     private(set) var lastRead = 0
     private var byPath: [String: SessionUsage] = [:]
@@ -259,9 +278,37 @@ final class UsageStore: @unchecked Sendable {
         self.cache = cache
     }
 
+    /// A transcript as listed, and the file behind it.
+    private struct Transcript {
+        let listed: URL
+        let real: URL
+        let project: String
+        let id: String
+        let subagents: [URL]
+        let stamps: [UsageCache.Stamp]
+        var linked: Bool { listed.path != real.path }
+    }
+
+    /// What one reading folds: files (mains first) and the cache key it is stored under.
+    private struct Job {
+        let key: String
+        let id: String
+        let project: String
+        let files: [URL]
+        let mains: Int
+        let stamps: [UsageCache.Stamp]
+        var bytes: Int { stamps.reduce(0) { $0.addingSaturating($1.size) } }
+    }
+
     /// Not reentrant: callers serialise, as with `SessionStore.load`.
     func load() -> [String: SessionUsage] {
         if Demo.active { byID = Demo.usage; return byID }
+        // Days and hours are local: a new time zone (travel) starts the figures afresh.
+        NSTimeZone.resetSystemTimeZone()
+        let zone = TimeZone.current
+        if entriesZone != zone.identifier { entries = nil }
+        if cache?.timeZone.identifier != zone.identifier { cache?.timeZone = zone }
+
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey, .isSymbolicLinkKey]
         func list(_ dir: URL) -> [URL] {
@@ -271,62 +318,113 @@ final class UsageStore: @unchecked Sendable {
             let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             return .init(path: url.path, size: v?.fileSize ?? 0, mtime: v?.contentModificationDate?.timeIntervalSince1970 ?? 0)
         }
-        let old = entries ?? cache?.load() ?? [:]
-        var next: [String: UsageCache.Entry] = [:]
-        var jobs: [Job] = []
+        /// The file behind a transcript, by its real path (so "/var/…" and "/private/var/…" are one file).
+        /// A link's target is read with lstat only, and nil when it leads into a privacy-protected
+        /// folder (even a stat there raises a prompt) or nowhere.
+        func real(_ url: URL) -> URL? {
+            var path = url.path
+            for _ in 0..<8 {
+                var st = stat()
+                guard lstat(path, &st) == 0 else { return nil }
+                if st.st_mode & S_IFMT != S_IFLNK {
+                    var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+                    return URL(fileURLWithPath: realpath(path, &buf).map { String(cString: $0) } ?? path)
+                }
+                guard let dest = try? fm.destinationOfSymbolicLink(atPath: path) else { return nil }
+                path = Paths.normalize(dest.hasPrefix("/") ? dest : (path as NSString).deletingLastPathComponent + "/" + dest)
+                if Paths.isPrivacyProtected(path) { return nil }
+            }
+            return nil
+        }
+
+        var transcripts: [Transcript] = []
         for dir in list(root) where (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
             for file in list(dir) where file.pathExtension == "jsonl" {
-                let subagents = UsageReader.subagentFiles(for: file, list: list)
-                let stamps = ([file] + subagents).map(stamp)
-                if let e = old[file.path], e.stamps == stamps { next[file.path] = e }
-                else { jobs.append((file, dir.lastPathComponent, subagents, stamps)) }
+                guard let real = real(file) else { continue }
+                let subagents = UsageReader.subagentFiles(for: real, list: list)
+                transcripts.append(.init(listed: file, real: real, project: dir.lastPathComponent,
+                                         id: file.deletingPathExtension().lastPathComponent, subagents: subagents,
+                                         stamps: ([real] + subagents).map(stamp)))
             }
         }
-        // In batches of about `batchBytes` of transcript, biggest sessions first, so the parsed events of
+        // One reading per real file (a listed one before a link to it), and one more per session ID
+        // filed as several real files, oldest first.
+        var canonical: [String: Transcript] = [:]
+        for t in transcripts.sorted(by: { ($0.linked ? 1 : 0, $0.listed.path) < ($1.linked ? 1 : 0, $1.listed.path) })
+        where canonical[t.real.path] == nil {
+            canonical[t.real.path] = t
+        }
+        var jobs: [Job] = []
+        for t in canonical.values {
+            jobs.append(.init(key: t.real.path, id: t.id, project: t.project, files: [t.real] + t.subagents, mains: 1, stamps: t.stamps))
+        }
+        for (id, copies) in Dictionary(grouping: canonical.values, by: \.id) where copies.count > 1 {
+            let byAge = copies.sorted { ($0.stamps[0].mtime, $0.real.path) < ($1.stamps[0].mtime, $1.real.path) }
+            jobs.append(.init(key: "merged " + id, id: id, project: byAge.last!.project,
+                              files: byAge.map(\.real) + byAge.flatMap(\.subagents), mains: byAge.count,
+                              stamps: byAge.map { $0.stamps[0] } + byAge.flatMap { $0.stamps.dropFirst() }))
+        }
+
+        let old = entries ?? cache?.load() ?? [:]
+        var next: [String: UsageCache.Entry] = [:]
+        var stale: [Job] = []
+        for j in jobs {
+            if let e = old[j.key], e.stamps == j.stamps { next[j.key] = e } else { stale.append(j) }
+        }
+        // In batches of about `batchBytes` of transcript, biggest sessions first (a session's own
+        // reading and its merged one together, so its files are parsed once), so the parsed events of
         // only one batch are held at a time.
-        jobs.sort { $0.stamps.reduce(0) { $0 + $1.size } > $1.stamps.reduce(0) { $0 + $1.size } }
+        let groups = Dictionary(grouping: stale, by: \.id).values.sorted {
+            ($0.reduce(0) { $0 + $1.bytes }, $0[0].id) > ($1.reduce(0) { $0 + $1.bytes }, $1[0].id)
+        }
         var batch: [Job] = [], bytes = 0
         func flush() {
-            for (j, u) in zip(batch, Self.read(batch)) { next[j.file.path] = .init(stamps: j.stamps, usage: u) }
+            for (j, u) in zip(batch, Self.read(batch)) { next[j.key] = .init(stamps: j.stamps, usage: u) }
             batch = []; bytes = 0
         }
-        for j in jobs {
-            batch.append(j)
-            bytes += j.stamps.reduce(0) { $0 + $1.size }
+        for g in groups {
+            batch += g
+            bytes = bytes.addingSaturating(g.reduce(0) { $0.addingSaturating($1.bytes) })
             if bytes >= Self.batchBytes { flush() }
         }
         flush()
-        lastRead = jobs.count
-        if !jobs.isEmpty || next.count != old.count { cache?.save(next) }
+        lastRead = stale.filter { $0.mains == 1 }.count
+        if !stale.isEmpty || next.count != old.count { cache?.save(next) }
         entries = next
-        // The same ID in two project folders (a copied transcript): the newer one, then the busier, then
-        // by folder name, so the choice never depends on dictionary order.
-        func rank(_ u: SessionUsage) -> (Date, Int, String) { (u.lastActive ?? .distantPast, u.replies, u.projectDir) }
-        var out: [String: SessionUsage] = [:]
-        for e in next.values {
-            if let have = out[e.usage.sessionID], rank(have) >= rank(e.usage) { continue }
-            out[e.usage.sessionID] = e.usage
+        entriesZone = zone.identifier
+
+        var paths: [String: SessionUsage] = [:]
+        var ids: [String: SessionUsage] = [:]
+        for t in transcripts {
+            guard let u = next[t.real.path]?.usage else { continue }
+            paths[t.listed.path] = u
         }
-        byPath = next.mapValues(\.usage)
-        byID = out
-        return out
+        for t in canonical.values {
+            ids[t.id] = next["merged " + t.id]?.usage ?? next[t.real.path]?.usage
+        }
+        byPath = paths
+        byID = ids
+        return ids
     }
 
-    private typealias Job = (file: URL, project: String, subagents: [URL], stamps: [UsageCache.Stamp])
     static let batchBytes = 384 << 20
 
     /// Every piece of every file in `jobs` at once (one session can hold hundreds of workflow agents),
-    /// biggest first; then each session's events in file order.
+    /// each file once, biggest first; then each job's events in its file order.
     private static func read(_ jobs: [Job]) -> [SessionUsage] {
         guard !jobs.isEmpty else { return [] }
-        var pieces: [(job: Int, file: Int, piece: Int, last: Bool, size: Int)] = []
-        for (j, job) in jobs.enumerated() {
-            for (f, s) in job.stamps.enumerated() {
-                let n = UsageReader.pieces(size: s.size)
-                for k in 0..<n {
-                    pieces.append((j, f, k, k == n - 1, min(UsageReader.pieceSize, s.size - k * UsageReader.pieceSize)))
-                }
+        var files: [(url: URL, subagent: Bool, size: Int)] = []
+        var index: [String: Int] = [:]
+        for j in jobs {
+            for (f, url) in j.files.enumerated() where index[url.path] == nil {
+                index[url.path] = files.count
+                files.append((url, f >= j.mains, j.stamps[f].size))
             }
+        }
+        var pieces: [(file: Int, piece: Int, last: Bool, size: Int)] = []
+        for (f, file) in files.enumerated() {
+            let n = UsageReader.pieces(size: file.size)
+            for k in 0..<n { pieces.append((f, k, k == n - 1, min(UsageReader.pieceSize, file.size - k * UsageReader.pieceSize))) }
         }
         pieces.sort { $0.size > $1.size }
         var parsed = [[UsageReader.Event]](repeating: [], count: pieces.count)
@@ -334,14 +432,13 @@ final class UsageStore: @unchecked Sendable {
             let out = buf.baseAddress!
             DispatchQueue.concurrentPerform(iterations: pieces.count) { i in
                 let p = pieces[i]
-                let url = p.file == 0 ? jobs[p.job].file : jobs[p.job].subagents[p.file - 1]
-                guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return }
-                out[i] = UsageReader.events(in: data, piece: p.piece, last: p.last, subagent: p.file > 0)
+                guard let data = try? Data(contentsOf: files[p.file].url, options: .alwaysMapped) else { return }
+                out[i] = UsageReader.events(in: data, piece: p.piece, last: p.last, subagent: files[p.file].subagent)
             }
         }
-        var files = jobs.map { [[UsageReader.Event]](repeating: [], count: $0.stamps.count) }
-        for i in pieces.indices.sorted(by: { (pieces[$0].job, pieces[$0].file, pieces[$0].piece) < (pieces[$1].job, pieces[$1].file, pieces[$1].piece) }) {
-            files[pieces[i].job][pieces[i].file] += parsed[i]
+        var events = [[UsageReader.Event]](repeating: [], count: files.count)
+        for i in pieces.indices.sorted(by: { (pieces[$0].file, pieces[$0].piece) < (pieces[$1].file, pieces[$1].piece) }) {
+            events[pieces[i].file] += parsed[i]
         }
         parsed = []
         var read = [SessionUsage?](repeating: nil, count: jobs.count)
@@ -350,8 +447,8 @@ final class UsageStore: @unchecked Sendable {
             let out = buf.baseAddress!
             DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
                 let j = jobs[i]
-                out[i] = UsageReader.fold(sessionID: j.file.deletingPathExtension().lastPathComponent, projectDir: j.project,
-                                          files: files[i], calendar: calendar)
+                out[i] = UsageReader.fold(sessionID: j.id, projectDir: j.project, files: j.files.map { events[index[$0.path]!] },
+                                          mains: j.mains, calendar: calendar)
             }
         }
         return read.compactMap { $0 }
