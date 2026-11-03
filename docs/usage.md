@@ -20,8 +20,10 @@ Demo.usage                              DemoUsage.swift: --demo's figures, playe
   API errors and lines include subagents; context, compactions, turns and tool time are the main
   thread's. Every figure not taken from Claude Code is marked by `Source.estimate` and shown "est.".
 - `UsageStore.load()` is safe off the main thread but not reentrant (callers serialise). It returns
-  one entry per session ID; `usage(forTranscript:)` / `byTranscript` give each transcript its own
-  when one ID is filed under two project folders (8 of 549 here; the ID map keeps the newer copy).
+  one entry per session ID, built from every real transcript filed under that ID (copies that may
+  have diverged, oldest first: each shared line and reply counted once); `usage(forTranscript:)` /
+  `byTranscript` give each transcript file its own. A transcript that is a link is read through its
+  target (stamped by the target), and not again when the target is listed too.
 - `Day` carries tokens, an estimated cost, Claude's working seconds per local hour and lines changed,
   so date filters and the weekday × hour grid work for sessions that span days. `cost(of:)` and
   `lines(of:)` scale a day's share to Claude Code's total when that is the session's figure.
@@ -44,8 +46,12 @@ Corrections to the plan's "Verified before planning" list are marked **(corrects
   same first timestamp): each session's figures include that copied history, so totals across
   sessions count it twice (1.4% of all output and cache reads here). Not corrected: it needs a pass
   across sessions (a reply ID already in an earlier-started transcript is a copy). Decision open.
-- **One session ID filed under two project folders** (8 IDs, 1,350 shared replies): two copies of one
-  conversation. The ID map keeps one; a sum over `byTranscript` counts both.
+- **One session ID filed under two project folders** (8 IDs). One is a link to the other file (read
+  once, through its target). Seven are real copies, and four of them diverged: 0ea946df has 14
+  replies only in one copy and 284 only in the other. The ID map now reads all copies as one
+  conversation (a shared line by its `uuid`, a reply by its `message.id`, the context curve in time
+  order, a cost-state current only against its own copy's replies); a sum over `byTranscript`
+  counts each copy whole.
 - **Workflow agents live a level deeper (corrects the plan):** `<session>/subagents/workflows/<run>/
   agent-*.jsonl` (1,674 files, 42K assistant lines) besides `<session>/subagents/agent-*.jsonl`
   (339). `<run>/journal.jsonl` is the workflow's own log (started/result records), not an agent.
@@ -73,21 +79,61 @@ Corrections to the plan's "Verified before planning" list are marked **(corrects
   `postTokens`, `cumulativeDroppedTokens`, `durationMs`); 47 here. One subagent compacted too
   (not counted: compactions are the main thread's).
 - **Turns:** `system`/`turn_duration` (`durationMs`, written at the turn's end) in 479 of 549
-  transcripts: 6,804 records against 8,550 prompts. Without any, a turn is estimated from a prompt
-  to the last main-thread reply before the next one. Subagents write `turn_duration` too (ignored).
+  transcripts: 6,804 records against 8,550 prompts, and some sessions have records only for later
+  turns (78d6c37e: 5 min recorded, 170 min before its first record). Subagents write
+  `turn_duration` too (ignored).
+- **`turn_duration` leaves out the time you take to answer.** Of 80 question or plan waits over 10
+  minutes, 67 are longer than the turn that holds them (one turn: 1 minute around a 138-minute wait);
+  13 are covered. So it measures Claude's own time, and a turn's record sits in the last `durationMs`
+  before its end, not spread over the wait.
 - **API errors:** `assistant` lines with `isApiErrorMessage`, model `<synthetic>`, `error`
   (`server_error` 74, `rate_limit` 47, `invalid_request` 21, `unknown` 17, `authentication_failed`
   10, `oauth_org_not_allowed` 2, `billing_error` 2), `apiErrorStatus` in 68, text "API Error: …";
   counted once per `message.id`. `system`/`api_error` (156) are retry notices, not counted.
 - **Lines:** Claude Code's own diff is in the tool result: `toolUseResult.structuredPatch` hunks
-  (lines starting `+`/`-`), or `type: "create"` with the file's `content`, counted as
-  `split("\n")` (a final newline starts one more line). That reproduces `totalLinesAdded/Removed`
-  exactly in 235 of 262 records; the rest are per-process records. An Edit or Write with no such
-  result falls back to its input (shared head and tail lines set aside).
+  (lines whose first byte is `+`/`-`; an empty list for a file written unchanged), or `type:
+  "create"` with the file's `content`, counted as `split("\n")` (a final newline starts one more
+  line). **Only a successful call counts:** 303 Edit and Write calls failed or were rejected
+  (`is_error`, or a `toolUseResult` that is only text such as "User rejected tool use"), and 8 had
+  no result. Subagent transcripts write no `toolUseResult` at all (576 successful calls): there the
+  call's input counts (shared head and tail lines set aside). **Each call once:** a forked subagent
+  repeats the parent's tool results (148 calls, 3,918 lines in one session). With these rules the
+  count equals Claude Code's `totalLinesAdded/Removed` in all 213 records that cover their transcript.
+- A diff line can start with `-` and then a combining mark (a Kannada nukta, seen once): one Swift
+  `Character`, but a removed line to Claude Code; the first byte decides.
 - **Usage fields seen:** `speed` only `standard`, `inference_geo` `global`, `not_available` or
   empty, `server_tool_use` never non-zero, `cache_creation` split into `ephemeral_5m/1h` on every
   reply (1-hour writes are most of the main thread's). `usage.iterations` had two entries once.
 - **Tool results are half of all bytes** (1.36 GB of 2.85 GB in main transcripts' user lines).
+
+## Rules after the review (2026-11-03)
+
+An independent review reproduced seven bugs; each is a self-test now (`UsageTests.review`), and the
+cross-check compares lines, tool time and turn seconds too.
+
+- **Tool time never includes waiting for you and never exceeds Claude worked.** It is the main
+  thread's calls, from `tool_use` to `tool_result`, overlaps once, minus two kinds:
+  `AskUserQuestion` and `ExitPlanMode` (`UsageBuilder.waitingTools`: their whole interval is your
+  answer) are left out; every other call is clipped to the turns' working time, which catches a
+  permission prompt inside a call (its wait lies outside the turn's `durationMs`). Working time is
+  each turn's interval: `[end − durationMs, end]` for a recorded turn, prompt to last reply for an
+  estimated one. Before: AskUserQuestion was 55% of all tool time, one call 21 h, and 31 sessions had
+  more tool time than working time (f27623d1: 948 min against 47). After: none.
+- **Turns one by one.** A prompt starts a turn (so does a reply after a recorded turn with no prompt
+  in between). A turn with Claude Code's `turn_duration` takes it; one without is estimated from its
+  prompt to its last reply, minus any time a recorded turn already covers (a prompt you queue
+  inside a turn splits it, and the record covers both halves). `Turns.source` is `.estimate` if any
+  turn was estimated (145 sessions that were `.claudeCode` before).
+- **Lines** as above: successful calls only, each call once, Claude Code's diff else the input.
+- **No input traps.** A number that is not finite, is negative or is over 1e12 (a turn or a
+  compaction over 48 h) counts as missing; strings such as "inf" or "1e400" too. Token sums
+  saturate at `Int.max`. A date outside 2020–2100 counts as missing, so no interval spans centuries;
+  an estimated turn over 48 h is left out, and spreading over hours stops at 48 h.
+- **Low:** a compaction with no `postTokens` after the last reply leaves `context.now` nil
+  (unknown). An API error with no timestamp keeps `at == .distantPast` and moves neither end of the
+  session. When Claude Code's line total is used but no day counted any lines, `lines(of:)` splits it
+  as Claude's working time fell over the days (else by replies, else evenly). A time zone change
+  while Search runs drops the figures in memory and the cache's (its key holds the zone).
 
 ## Prices and windows
 
@@ -105,17 +151,18 @@ Window unknown (retired models): no percentage, "near the limit" from 800K token
 
 ## The cache
 
-`~/Library/Caches/<helper bundle ID>/usage.json`, never under ~/.claude. One entry per transcript
-path with the size and mtime of the transcript and each subagent file; the file's key holds
-`UsageCache.version`, `Pricing.checked` and the time zone (days and hours are local, Gregorian), so
-any of them changing rebuilds it. `CLAWS_SEARCH_CACHE=<dir>` moves it, for timing a first read.
+`~/Library/Caches/<helper bundle ID>/usage.json`, never under ~/.claude. One entry per real
+transcript path (and one `merged <id>` per ID filed twice) with the size and mtime of every file it
+read; the file's key holds `UsageCache.version` (2 since the review), `Pricing.checked` and the
+time zone (days and hours are local, Gregorian), so any of them changing rebuilds it.
+`CLAWS_SEARCH_CACHE=<dir>` moves it, for timing a first read (`UsageCache.defaultFolder` ignores it).
 
 ## Measured (2026-11-03, Apple silicon, 10 cores, macOS 27.0.1, 542 sessions, 2.9 GB)
 
 | Run | Time | Peak footprint |
 | --- | --- | --- |
-| First read (empty cache), `--usage-dump` | 2.0–3.4 s load, 4.1 s with the dump | 108–115 MB |
-| Reopen (cache), `--usage-dump` | 0.15–0.17 s load, 0.3 s in all | 72 MB |
+| First read (empty cache), `--usage-dump` | 2.0–3.4 s load (3.1 s after the review) | 108–115 MB (142 MB after: line markers for copies) |
+| Reopen (cache), `--usage-dump` | 0.15–0.21 s load, 0.35 s in all | 72–75 MB |
 
 A live session's transcript changes between loads and is read again (about 0.2 s for a 98 MB one).
 
@@ -125,12 +172,14 @@ A live session's transcript changes between loads and is read again (about 0.2 s
 cache by default) and reads every transcript itself in Python: `json.loads` on every line, no
 pieces, its own price table. It prints exact agreement per field, the mismatches (ID prefixes), the
 estimates against Claude Code's current figures, the price-table check, and unpriced models. It
-writes nothing; its output is about your sessions: never commit it. On 2026-11-03: 533 sessions
-compared (1 written during the check and 8 filed twice left out), **exact on all 13 fields** (replies,
-tokens, tokens by model, subagents and their tokens, turns and their seconds, tools, compactions,
-API errors, context now, cost source, estimate). Estimates against Claude Code: within 3% for 191
-of the 212 sessions whose record covers the transcript (90%; median −0.07%), and for 200 of all
-256 current records (78%). The 21 covering misses are all underestimates (−3% to −29%) where Claude
+writes nothing; its output is about your sessions: never commit it. After the review (2026-11-03):
+541 sessions compared (1 written during the check left out; the 7 IDs filed as several copies and
+the linked transcript included, read the same way), **exact on all 15 fields**: replies, tokens,
+tokens by model, subagents and their tokens, turns (count and source) and their seconds, tool
+seconds, tools, compactions, API errors, context now, cost source, estimate, lines (added, removed,
+source). No session has more tool time than working time, and the lines counted equal Claude Code's
+own in all 212 records that cover their transcript. Estimates against Claude Code: within 3% for 191
+of those 212 (90%; median −0.07%), and for 200 of all 257 current records (77%). The 21 covering misses are all underestimates (−3% to −29%) where Claude
 Code counted more of every token kind than any transcript holds (fresh input 4–960x, cache writes
 1.0–2.0x, cache reads 1.0–1.65x): calls it bills but never writes, which the transcripts cannot price
 (inferred from the counts; which calls was not traced). The 44 current records that do not cover
@@ -151,9 +200,14 @@ missed). No model in the real data lacks a price.
   (`Timestamp`); anything else falls back to `ISO8601DateFormatter`.
 - **`Calendar.current` may not be Gregorian**: days use `Calendar.usage` (Gregorian, your zone).
 - **`NSTimeZone.default` did not change `TimeZone.current`** in-process: the cache takes its zone as
-  a parameter, so the test can pass another one.
-- **One ID in two project folders**: which copy the ID map keeps must not depend on dictionary order
-  (newest, then most replies, then folder name).
+  a parameter, so the test can pass another one. A real zone change is not tested (it needs the
+  system's), only the cache key.
+- **`Int(someDouble)` traps** on anything out of range: one `1e19` in a transcript killed Search at
+  every launch (the read starts when the model is created). Every number goes through
+  `lenientNumber`/`lenientCount`; `Int(saturating:)` and `addingSaturating` elsewhere.
+- **A listing spells the temporary folder `/private/var/…`, a link may say `/var/…`:** real files
+  are compared by `realpath`, called only once the link's text is known to stay outside protected
+  folders.
 
 ## Commands
 

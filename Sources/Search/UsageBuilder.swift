@@ -6,6 +6,9 @@ struct UsageBuilder {
     let sessionID: String
     let projectDir: String
     var calendar: Calendar
+    /// Main transcripts among the files (several for copies of one conversation): their context points
+    /// are put in time order.
+    var mains = 1
 
     /// One API call. A reply is written as several lines, each repeating its usage as it stood when the
     /// line was written: the output count grows, so the last line's is the reply's.
@@ -29,22 +32,31 @@ struct UsageBuilder {
         var unknownModelCost = false
     }
 
+    /// Tools whose call waits for you (a question, a plan to approve): never tool time.
+    static let waitingTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+
     private var replies: [String: Reply] = [:]
     private var replyFile: [String: Int] = [:]
     private var replyOrder: [String] = []
     private var errorIDs = Set<String>()
     /// Main-thread events in transcript order, for the context curve and "context now".
     private enum Mark { case reply(String), compaction(Int) }
-    private var mainMarks: [Mark] = []
+    private var mainMarks: [(mark: Mark, at: Date?)] = []
     private var compactions: [SessionUsage.Compaction] = []
-    private var turnRecords: [(end: Date, seconds: Double)] = []
-    private var prompts: [Date] = []
-    private var lastMainReplyAt: [Date] = []    // per prompt: the last main-thread reply after it
+    /// A turn: from a prompt (or a reply with no prompt before it) to the next; Claude Code's
+    /// `turn_duration` when it wrote one, else from the prompt to its last reply.
+    private struct Turn {
+        var start: Date?
+        var lastReply: Date?
+        var record: (end: Date, seconds: Double)?
+    }
+    private var turns: [Turn] = []
     private var toolNames: [String: String] = [:]
     private var toolStarts: [String: Date] = [:]
-    private var toolIntervals: [(Date, Date)] = []
+    private var toolIntervals: [(start: Date, end: Date, name: String)] = []
     private var errors: [SessionUsage.APIError] = []
     private var costState: CostState?
+    private var costStateFile = 0
     private var costStateCurrent = false
     private var estimatedLines = (added: 0, removed: 0)
     private var lineEdits: [(at: Date, added: Int, removed: Int)] = []
@@ -60,7 +72,7 @@ struct UsageBuilder {
     }
 
     mutating func saw(_ at: Date?) {
-        guard let at else { return }
+        guard let at, at != .distantPast else { return }
         if first.map({ at < $0 }) ?? true { first = at }
         if last.map({ at > $0 }) ?? true { last = at }
     }
@@ -79,33 +91,42 @@ struct UsageBuilder {
         } else {
             replyFile[id] = file
             replyOrder.append(id)
-            if !r.subagent { mainMarks.append(.reply(id)) }
+            if !r.subagent { mainMarks.append((.reply(id), r.at)) }
         }
         replies[id] = r
-        if !r.subagent {
-            costStateCurrent = false
-            if !prompts.isEmpty, let at = r.at { lastMainReplyAt[prompts.count - 1] = at }
+        guard !r.subagent else { return }
+        if file == costStateFile { costStateCurrent = false }
+        if let at = r.at {
+            if let i = turns.indices.last, turns[i].record == nil {
+                turns[i].lastReply = max(turns[i].lastReply ?? at, at)
+            } else {
+                turns.append(Turn(start: at, lastReply: at))     // Claude went on without a prompt
+            }
         }
     }
 
-    /// A prompt you typed (or one Claude Code sent for you): where an estimated turn begins.
+    /// A prompt you typed (or one Claude Code sent for you): where a turn begins.
     mutating func prompt(at: Date?) {
         saw(at)
         guard let at else { return }
-        prompts.append(at)
-        lastMainReplyAt.append(.distantPast)
+        turns.append(Turn(start: at))
     }
 
     mutating func compaction(_ c: SessionUsage.Compaction) {
         saw(c.at)
-        mainMarks.append(.compaction(compactions.count))
+        mainMarks.append((.compaction(compactions.count), c.at))
         compactions.append(c)
     }
 
-    /// Claude Code's `turn_duration`: written when a turn ends, with how long it took.
+    /// Claude Code's `turn_duration`: written when a turn ends, with how long Claude worked in it.
     mutating func turn(end: Date, seconds: Double) {
         saw(end)
-        turnRecords.append((end, max(0, seconds)))
+        let s = min(max(0, seconds), UsageLine.Limits.seconds)
+        if let i = turns.indices.last, turns[i].record == nil, (turns[i].start ?? .distantPast) <= end {
+            turns[i].record = (end, s)
+        } else {
+            turns.append(Turn(record: (end, s)))
+        }
     }
 
     /// Each `tool_use` block once, by its ID; only the main thread's count towards tool time.
@@ -117,26 +138,29 @@ struct UsageBuilder {
 
     mutating func toolResult(id: String, at: Date?) {
         guard let at, let start = toolStarts.removeValue(forKey: id), at >= start else { return }
-        toolIntervals.append((start, at))
+        toolIntervals.append((start, at, toolNames[id] ?? ""))
     }
 
-    /// Claude Code's "API Error: …" line, once per `id` (its message ID) when it has one.
+    /// Claude Code's "API Error: …" line, once per `id` (its message ID) when it has one. One without
+    /// a timestamp keeps `at == .distantPast` and moves neither end of the session.
     mutating func apiError(_ e: SessionUsage.APIError, id: String? = nil) {
         if let id { guard errorIDs.insert(id).inserted else { return } }
         saw(e.at)
         errors.append(e)
     }
 
-    /// Claude Code's `cost-state`, main thread only. It stays current until a main-thread reply follows.
-    mutating func costState(_ c: CostState) {
+    /// Claude Code's `cost-state`, main thread only. It stays current until a reply follows in the same
+    /// transcript (a copy of the conversation filed elsewhere has records of its own).
+    mutating func costState(_ c: CostState, file: Int = 0) {
         costState = c
+        costStateFile = file
         costStateCurrent = true
     }
 
     /// Lines one Edit or Write changed, on the day of `at` (its tool result).
     mutating func editedLines(added: Int, removed: Int, at: Date? = nil) {
-        estimatedLines.added += added
-        estimatedLines.removed += removed
+        estimatedLines.added = estimatedLines.added.addingSaturating(added)
+        estimatedLines.removed = estimatedLines.removed.addingSaturating(removed)
         if let at { lineEdits.append((at, added, removed)) }
     }
 
@@ -194,7 +218,10 @@ struct UsageBuilder {
         u.cost.estimateUSD = anyPriced ? estimate : (u.replies == 0 ? 0 : nil)
         u.cost.unpriced = unpriced.sorted()
         u.cost.claudeCodeUSD = costState?.usd
-        if let c = costState, costStateCurrent, Self.covers(c, output: u.tokens.output, cacheRead: u.tokens.cacheRead) {
+        let claudeCode = costState.flatMap { c in
+            costStateCurrent && Self.covers(c, output: u.tokens.output, cacheRead: u.tokens.cacheRead) ? c : nil
+        }
+        if let c = claudeCode {
             u.cost.usd = c.usd
             u.cost.source = .claudeCode
         } else {
@@ -202,8 +229,15 @@ struct UsageBuilder {
             u.cost.source = .estimate
         }
 
-        // Context: the main thread's, reply by reply; a compaction after the last reply sets "now".
-        for mark in mainMarks {
+        // Context: the main thread's, reply by reply; a compaction after the last reply sets "now"
+        // (unknown when it did not say how much it kept). Copies of one conversation: in time order.
+        var marks = mainMarks
+        if mains > 1 {
+            var key = Date.distantPast
+            let keyed = marks.enumerated().map { i, m -> (Date, Int) in key = m.at ?? key; return (key, i) }
+            marks = keyed.sorted { $0 < $1 }.map { marks[$0.1] }
+        }
+        for (mark, _) in marks {
             switch mark {
             case .reply(let id):
                 guard let r = replies[id] else { continue }
@@ -211,47 +245,54 @@ struct UsageBuilder {
                 u.context.now = r.tokens.prompt
                 u.context.model = r.model
             case .compaction(let i):
-                if let post = compactions[i].postTokens { u.context.now = post }
+                u.context.now = compactions[i].postTokens
             }
         }
         u.context.compactions = compactions
 
-        // Turns: Claude Code's own durations, else from each prompt to the last reply before the next one.
-        var intervals: [(Date, Date)] = []
-        if !turnRecords.isEmpty {
-            u.turns.source = .claudeCode
-            for t in turnRecords {
+        // Turns: each one Claude Code's own `turn_duration` when it wrote one, else from its prompt to
+        // its last reply (not where a recorded turn already covers that time, as when a prompt you
+        // queued splits one turn in two). An estimate longer than any turn can be is left out.
+        let recorded = Self.merge(turns.compactMap { t in t.record.map { ($0.end.addingTimeInterval(-$0.seconds), $0.end) } })
+        var working: [(Date, Date)] = []
+        var estimatedTurns = 0
+        for t in turns {
+            if let r = t.record {
                 u.turns.count += 1
-                u.turns.seconds += t.seconds
-                u.turns.longestSeconds = max(u.turns.longestSeconds, t.seconds)
-                intervals.append((t.end.addingTimeInterval(-t.seconds), t.end))
-            }
-        } else {
-            u.turns.source = .estimate
-            for (start, end) in zip(prompts, lastMainReplyAt) where end > start {
-                let secs = end.timeIntervalSince(start)
+                u.turns.seconds += r.seconds
+                u.turns.longestSeconds = max(u.turns.longestSeconds, r.seconds)
+                working.append((r.end.addingTimeInterval(-r.seconds), r.end))
+            } else if let start = t.start, let end = t.lastReply, end > start,
+                      end.timeIntervalSince(start) <= UsageLine.Limits.seconds {
+                let pieces = Self.subtract((start, end), recorded)
+                let secs = Self.length(pieces)
+                guard secs > 0 else { continue }
                 u.turns.count += 1
                 u.turns.seconds += secs
                 u.turns.longestSeconds = max(u.turns.longestSeconds, secs)
-                intervals.append((start, end))
+                working += pieces
+                estimatedTurns += 1
             }
         }
-        for (start, end) in intervals { spread(start, end, into: &days) }
+        u.turns.source = estimatedTurns > 0 || recorded.isEmpty ? .estimate : .claudeCode
+        for (start, end) in working { spread(start, end, into: &days) }
         for e in lineEdits {
             let key = dayKey(e.at)
             var d = days[key.date] ?? SessionUsage.Day(date: key.date, weekday: key.weekday)
-            d.linesAdded += e.added
-            d.linesRemoved += e.removed
+            d.linesAdded = d.linesAdded.addingSaturating(e.added)
+            d.linesRemoved = d.linesRemoved.addingSaturating(e.removed)
             days[key.date] = d
         }
         u.days = days.values.sorted { $0.date < $1.date }
 
-        u.toolSeconds = Self.union(toolIntervals)
+        // Tool time: the main thread's calls, never one that waits for you, and only while Claude was
+        // working (a permission prompt sits inside its call's interval, outside the turn's work).
+        let calls = Self.merge(toolIntervals.filter { !Self.waitingTools.contains($0.name) }.map { ($0.start, $0.end) })
+        u.toolSeconds = Self.length(Self.intersect(calls, Self.merge(working)))
         for name in toolNames.values { u.tools[name, default: 0] += 1 }
         u.apiErrors = errors.sorted { $0.at < $1.at }
 
-        if let c = costState, costStateCurrent, let added = c.linesAdded, let removed = c.linesRemoved,
-           Self.covers(c, output: u.tokens.output, cacheRead: u.tokens.cacheRead) {
+        if let c = claudeCode, let added = c.linesAdded, let removed = c.linesRemoved {
             u.lines = .init(added: added, removed: removed, source: .claudeCode)
         } else {
             u.lines = .init(added: estimatedLines.added, removed: estimatedLines.removed, source: .estimate)
@@ -264,35 +305,60 @@ struct UsageBuilder {
         return (String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0), c.weekday ?? 1)
     }
 
-    /// Adds working time to each local day and hour it falls in.
+    /// Adds working time to each local day and hour it falls in (at most one turn's worth).
     private func spread(_ start: Date, _ end: Date, into days: inout [String: SessionUsage.Day]) {
         var t = start
-        while t < end {
+        let stopAt = min(end, start.addingTimeInterval(UsageLine.Limits.seconds))
+        while t < stopAt {
             guard let hour = calendar.dateInterval(of: .hour, for: t) else { return }
-            let stop = min(end, hour.end)
+            let stop = min(stopAt, hour.end)
             let key = dayKey(t)
             var d = days[key.date] ?? SessionUsage.Day(date: key.date, weekday: key.weekday)
             let h = calendar.component(.hour, from: t)
             if (0..<24).contains(h) { d.workSeconds[h] += stop.timeIntervalSince(t) }
             days[key.date] = d
-            t = stop > t ? stop : end
+            t = stop > t ? stop : stopAt
         }
     }
 
-    /// Total length of a set of intervals, overlaps counted once.
-    static func union(_ intervals: [(Date, Date)]) -> Double {
-        var total = 0.0
-        var current: (Date, Date)?
-        for (a, b) in intervals.sorted(by: { $0.0 < $1.0 }) {
-            if let c = current, a <= c.1 {
-                current = (c.0, max(c.1, b))
-            } else {
-                if let c = current { total += c.1.timeIntervalSince(c.0) }
-                current = (a, b)
-            }
+    /// Intervals sorted and joined where they overlap or touch.
+    static func merge(_ intervals: [(Date, Date)]) -> [(Date, Date)] {
+        var out: [(Date, Date)] = []
+        for (a, b) in intervals.filter({ $0.1 > $0.0 }).sorted(by: { $0.0 < $1.0 }) {
+            if let l = out.last, a <= l.1 { out[out.count - 1].1 = max(l.1, b) } else { out.append((a, b)) }
         }
-        if let c = current { total += c.1.timeIntervalSince(c.0) }
-        return total
+        return out
+    }
+
+    static func length(_ intervals: [(Date, Date)]) -> Double {
+        merge(intervals).reduce(0) { $0 + $1.1.timeIntervalSince($1.0) }
+    }
+
+    /// Total length of a set of intervals, overlaps counted once.
+    static func union(_ intervals: [(Date, Date)]) -> Double { length(intervals) }
+
+    /// Where two merged sets of intervals overlap.
+    static func intersect(_ a: [(Date, Date)], _ b: [(Date, Date)]) -> [(Date, Date)] {
+        var out: [(Date, Date)] = []
+        var i = 0, j = 0
+        while i < a.count, j < b.count {
+            let lo = max(a[i].0, b[j].0), hi = min(a[i].1, b[j].1)
+            if hi > lo { out.append((lo, hi)) }
+            if a[i].1 < b[j].1 { i += 1 } else { j += 1 }
+        }
+        return out
+    }
+
+    /// An interval without the parts a merged set covers.
+    static func subtract(_ x: (Date, Date), _ cover: [(Date, Date)]) -> [(Date, Date)] {
+        var out: [(Date, Date)] = []
+        var start = x.0
+        for (a, b) in cover where b > start && a < x.1 {
+            if a > start { out.append((start, a)) }
+            start = max(start, b)
+        }
+        if x.1 > start { out.append((start, x.1)) }
+        return out
     }
 }
 
