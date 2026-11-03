@@ -70,7 +70,7 @@ extension Demo {
     static func loadUsage(home: URL, now: Date) { usage = makeUsage(home: home, now: now) }
     static func dropUsage() { usage = [:] }
 
-    static func makeUsage(home: URL, now: Date, calendar: Calendar = .current) -> [String: SessionUsage] {
+    static func makeUsage(home: URL, now: Date, calendar: Calendar = .usage) -> [String: SessionUsage] {
         var out: [String: SessionUsage] = [:]
         for (i, s) in sessions.enumerated() {
             guard let spec = usageSpecs[s.id] else { continue }
@@ -172,13 +172,16 @@ extension Demo {
             subagent(&b, &rng, spec, index: agentsLeft, from: start.addingTimeInterval(60), to: start.addingTimeInterval(400))
         }
 
-        if spec.record == .none { b.editedLines(added: spec.lines.added, removed: spec.lines.removed) }
+        // Counted from the calls, on the session's last day; Claude Code's own figure, where it has one,
+        // is a few lines more (it also counts edits whose results were not written).
+        if spec.record != .stale { b.editedLines(added: spec.lines.added, removed: spec.lines.removed, at: end) }
         let sofar = b.build()
         switch spec.record {
         case .current:
             // Claude Code's figure is a little higher: it also counts its own small Haiku requests.
             b.costState(.init(usd: (sofar.cost.estimateUSD ?? 0) * 1.011, output: sofar.tokens.output + 40,
-                              cacheRead: sofar.tokens.cacheRead, linesAdded: spec.lines.added, linesRemoved: spec.lines.removed))
+                              cacheRead: sofar.tokens.cacheRead, linesAdded: spec.lines.added + spec.lines.added / 25,
+                              linesRemoved: spec.lines.removed))
         case .stale:
             // Written an hour before the last replies: kept, shown nowhere but `claudeCodeUSD`.
             b.costState(.init(usd: (sofar.cost.estimateUSD ?? 0) * 0.7, output: sofar.tokens.output * 7 / 10,
@@ -186,7 +189,7 @@ extension Demo {
             b.reply(id: "msg_demo_late", .init(at: end, model: spec.model,
                                                tokens: .init(output: 900, cacheRead: previous, cacheWrite: 1_200, cacheWrite1h: 1_200, input: 4),
                                                subagent: false))
-            b.editedLines(added: spec.lines.added, removed: spec.lines.removed)
+            b.editedLines(added: spec.lines.added, removed: spec.lines.removed, at: end)
         case .none:
             break
         }

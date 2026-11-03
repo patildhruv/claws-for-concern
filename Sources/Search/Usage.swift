@@ -158,6 +158,10 @@ struct SessionUsage: Codable, Equatable {
         var replies = 0
         /// Claude's working time in each local hour, 0…23 (seconds).
         var workSeconds: [Double] = Array(repeating: 0, count: 24)
+        /// Lines changed by Edit and Write calls whose results came that day, always counted here;
+        /// `lines(of:)` scales them to Claude Code's total when that is the session's figure.
+        var linesAdded = 0
+        var linesRemoved = 0
     }
 
     struct Lines: Codable, Equatable {
@@ -204,6 +208,17 @@ extension SessionUsage {
         return est * usd / total
     }
 
+    /// One day's share of `lines`: its own count, scaled to Claude Code's total when that is the
+    /// session's figure, so a session's days add up to its total (give or take rounding).
+    func lines(of day: Day) -> (added: Int, removed: Int) {
+        guard lines.source == .claudeCode else { return (day.linesAdded, day.linesRemoved) }
+        func scale(_ v: Int, _ total: Int, _ counted: Int) -> Int {
+            counted > 0 ? Int((Double(v) * Double(total) / Double(counted)).rounded()) : v
+        }
+        let added = days.reduce(0) { $0 + $1.linesAdded }, removed = days.reduce(0) { $0 + $1.linesRemoved }
+        return (scale(day.linesAdded, lines.added, added), scale(day.linesRemoved, lines.removed, removed))
+    }
+
     /// Claude's working seconds by weekday (rows 0…6 = Sunday…Saturday) and local hour (columns 0…23),
     /// over the days on or after `from` ("yyyy-MM-dd"; nil for all).
     static func activity<S: Sequence>(_ sessions: S, from: String? = nil) -> [[Double]] where S.Element == SessionUsage {
@@ -217,19 +232,128 @@ extension SessionUsage {
     }
 }
 
-/// Every session's usage, keyed by session ID: what Search's panel and the Usage window read. Under
-/// `--demo` it is `Demo.usage`, the made-up sessions' figures, and nothing of yours is read.
+/// Every session's usage, keyed by session ID: what Search's panel and the Usage window read. Reads
+/// only transcripts whose files changed since the last call or the last run (`UsageCache`), in
+/// parallel, biggest first. Under `--demo` it is `Demo.usage`, and nothing of yours is read.
 final class UsageStore: @unchecked Sendable {
     let root: URL
+    let cache: UsageCache?
+    private var entries: [String: UsageCache.Entry]?
+    /// Transcripts read by the last `load()`: the rest came from the cache.
+    private(set) var lastRead = 0
+    private var byPath: [String: SessionUsage] = [:]
+    private var byID: [String: SessionUsage] = [:]
 
-    init(root: URL = URL(fileURLWithPath: Paths.home).appendingPathComponent(".claude/projects", isDirectory: true)) {
+    /// One transcript's figures from the last `load()` (`Session.file`): by its path, so the two copies
+    /// of a session ID filed under two project folders (8 of 549 here) keep their own; else by ID.
+    func usage(forTranscript file: URL) -> SessionUsage? {
+        byPath[file.path] ?? byID[file.deletingPathExtension().lastPathComponent]
+    }
+
+    /// Every transcript's figures by its path, as of the last `load()`; read on the thread that called it.
+    var byTranscript: [String: SessionUsage] { byPath }
+
+    init(root: URL = URL(fileURLWithPath: Paths.home).appendingPathComponent(".claude/projects", isDirectory: true),
+         cache: UsageCache? = UsageCache()) {
         self.root = root
+        self.cache = cache
     }
 
     /// Not reentrant: callers serialise, as with `SessionStore.load`.
     func load() -> [String: SessionUsage] {
-        if Demo.active { return Demo.usage }
-        // The reader and its cache come in the next commit; until then real sessions have no figures.
-        return [:]
+        if Demo.active { byID = Demo.usage; return byID }
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
+        func list(_ dir: URL) -> [URL] {
+            (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
+        }
+        func stamp(_ url: URL) -> UsageCache.Stamp {
+            let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return .init(path: url.path, size: v?.fileSize ?? 0, mtime: v?.contentModificationDate?.timeIntervalSince1970 ?? 0)
+        }
+        let old = entries ?? cache?.load() ?? [:]
+        var next: [String: UsageCache.Entry] = [:]
+        var jobs: [Job] = []
+        for dir in list(root) where (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            for file in list(dir) where file.pathExtension == "jsonl" {
+                let subagents = UsageReader.subagentFiles(for: file, list: list)
+                let stamps = ([file] + subagents).map(stamp)
+                if let e = old[file.path], e.stamps == stamps { next[file.path] = e }
+                else { jobs.append((file, dir.lastPathComponent, subagents, stamps)) }
+            }
+        }
+        // In batches of about `batchBytes` of transcript, biggest sessions first, so the parsed events of
+        // only one batch are held at a time.
+        jobs.sort { $0.stamps.reduce(0) { $0 + $1.size } > $1.stamps.reduce(0) { $0 + $1.size } }
+        var batch: [Job] = [], bytes = 0
+        func flush() {
+            for (j, u) in zip(batch, Self.read(batch)) { next[j.file.path] = .init(stamps: j.stamps, usage: u) }
+            batch = []; bytes = 0
+        }
+        for j in jobs {
+            batch.append(j)
+            bytes += j.stamps.reduce(0) { $0 + $1.size }
+            if bytes >= Self.batchBytes { flush() }
+        }
+        flush()
+        lastRead = jobs.count
+        if !jobs.isEmpty || next.count != old.count { cache?.save(next) }
+        entries = next
+        // The same ID in two project folders (a copied transcript): the newer one, then the busier, then
+        // by folder name, so the choice never depends on dictionary order.
+        func rank(_ u: SessionUsage) -> (Date, Int, String) { (u.lastActive ?? .distantPast, u.replies, u.projectDir) }
+        var out: [String: SessionUsage] = [:]
+        for e in next.values {
+            if let have = out[e.usage.sessionID], rank(have) >= rank(e.usage) { continue }
+            out[e.usage.sessionID] = e.usage
+        }
+        byPath = next.mapValues(\.usage)
+        byID = out
+        return out
+    }
+
+    private typealias Job = (file: URL, project: String, subagents: [URL], stamps: [UsageCache.Stamp])
+    static let batchBytes = 384 << 20
+
+    /// Every piece of every file in `jobs` at once (one session can hold hundreds of workflow agents),
+    /// biggest first; then each session's events in file order.
+    private static func read(_ jobs: [Job]) -> [SessionUsage] {
+        guard !jobs.isEmpty else { return [] }
+        var pieces: [(job: Int, file: Int, piece: Int, last: Bool, size: Int)] = []
+        for (j, job) in jobs.enumerated() {
+            for (f, s) in job.stamps.enumerated() {
+                let n = UsageReader.pieces(size: s.size)
+                for k in 0..<n {
+                    pieces.append((j, f, k, k == n - 1, min(UsageReader.pieceSize, s.size - k * UsageReader.pieceSize)))
+                }
+            }
+        }
+        pieces.sort { $0.size > $1.size }
+        var parsed = [[UsageReader.Event]](repeating: [], count: pieces.count)
+        parsed.withUnsafeMutableBufferPointer { buf in
+            let out = buf.baseAddress!
+            DispatchQueue.concurrentPerform(iterations: pieces.count) { i in
+                let p = pieces[i]
+                let url = p.file == 0 ? jobs[p.job].file : jobs[p.job].subagents[p.file - 1]
+                guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return }
+                out[i] = UsageReader.events(in: data, piece: p.piece, last: p.last, subagent: p.file > 0)
+            }
+        }
+        var files = jobs.map { [[UsageReader.Event]](repeating: [], count: $0.stamps.count) }
+        for i in pieces.indices.sorted(by: { (pieces[$0].job, pieces[$0].file, pieces[$0].piece) < (pieces[$1].job, pieces[$1].file, pieces[$1].piece) }) {
+            files[pieces[i].job][pieces[i].file] += parsed[i]
+        }
+        parsed = []
+        var read = [SessionUsage?](repeating: nil, count: jobs.count)
+        let calendar = Calendar.usage
+        read.withUnsafeMutableBufferPointer { buf in
+            let out = buf.baseAddress!
+            DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+                let j = jobs[i]
+                out[i] = UsageReader.fold(sessionID: j.file.deletingPathExtension().lastPathComponent, projectDir: j.project,
+                                          files: files[i], calendar: calendar)
+            }
+        }
+        return read.compactMap { $0 }
     }
 }

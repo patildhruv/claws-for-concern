@@ -7,6 +7,8 @@ import SwiftUI
 @MainActor
 final class UsageModel: ObservableObject {
     @Published private(set) var bySession: [String: SessionUsage] = [:]
+    /// By transcript path: 8 session IDs here are filed in two project folders, and Search lists both.
+    private(set) var byFile: [String: SessionUsage] = [:]
     @Published private(set) var loading = false
     /// When the figures were last read; nil until the first read finishes.
     @Published private(set) var updated: Date?
@@ -34,18 +36,24 @@ final class UsageModel: ObservableObject {
 
     subscript(id: String) -> SessionUsage? { bySession[id] }
 
+    /// The figures for one of Search's sessions: its own transcript's, so a session ID filed in two project
+    /// folders shows each copy's own; else by ID (the demo). Prefer this wherever a `Session` is at hand.
+    func usage(for session: Session) -> SessionUsage? { byFile[session.file.path] ?? bySession[session.id] }
+
     func refresh() {
         if loading { queued = true; return }
         loading = true
         let store = store
         Task.detached(priority: .utility) { [weak self] in
             let all = store.load()
-            await self?.finish(all)
+            let files = store.byTranscript
+            await self?.finish(all, files)
         }
     }
 
-    private func finish(_ all: [String: SessionUsage]) {
+    private func finish(_ all: [String: SessionUsage], _ files: [String: SessionUsage]) {
         loading = false
+        byFile = files
         if all != bySession { bySession = all }
         updated = Date()
         if queued { queued = false; refresh() }
