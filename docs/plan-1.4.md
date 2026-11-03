@@ -5,6 +5,10 @@ and across all of them in a new Usage window. Fields were picked by the client f
 
 ## Verified before planning (2026-11-03, Claude Code 2.1.316, 547 real transcripts)
 
+Several of these facts were corrected during the build (a reply's output grows across its lines;
+`cost-state` is per process; workflow agents sit a folder deeper): docs/usage.md has the verified
+rules, and wins where the two disagree.
+
 - **A reply is written as several lines, each repeating the same `usage`.** One transcript: 2,015
   assistant lines for 845 replies (up to 5 lines each); output tokens summed per line 2.95M, per
   reply 1.09M. **Count each `message.id` once.**

@@ -45,9 +45,11 @@ Corrections to the plan's "Verified before planning" list are marked **(corrects
   unmarked verbatim copy of another session's replies in the same project folder (692 replies, the
   same first timestamp): each session's figures include that copied history, so totals across
   sessions count it twice (1.4% of all output and cache reads here). Not corrected: it needs a pass
-  across sessions (a reply ID already in an earlier-started transcript is a copy). Decision open.
+  across sessions (a reply ID already in an earlier-started transcript is a copy). PM decision
+  (2026-11-03): accepted for 1.4.0, about 1.4% of output and cache reads across sessions counted twice;
+  fix in a later 1.4.x.
 - **One session ID filed under two project folders** (8 IDs). One is a link to the other file (read
-  once, through its target). Seven are real copies, and four of them diverged: 0ea946df has 14
+  once, through its target). Seven are real copies, and four of them diverged: one has 14
   replies only in one copy and 284 only in the other. The ID map now reads all copies as one
   conversation (a shared line by its `uuid`, a reply by its `message.id`, the context curve in time
   order, a cost-state current only against its own copy's replies); a sum over `byTranscript`
@@ -80,7 +82,7 @@ Corrections to the plan's "Verified before planning" list are marked **(corrects
   (not counted: compactions are the main thread's).
 - **Turns:** `system`/`turn_duration` (`durationMs`, written at the turn's end) in 479 of 549
   transcripts: 6,804 records against 8,550 prompts, and some sessions have records only for later
-  turns (78d6c37e: 5 min recorded, 170 min before its first record). Subagents write
+  turns (one: 5 min recorded, 170 min before its first record). Subagents write
   `turn_duration` too (ignored).
 - **`turn_duration` leaves out the time you take to answer.** Of 80 question or plan waits over 10
   minutes, 67 are longer than the turn that holds them (one turn: 1 minute around a 138-minute wait);
@@ -118,7 +120,7 @@ cross-check compares lines, tool time and turn seconds too.
   permission prompt inside a call (its wait lies outside the turn's `durationMs`). Working time is
   each turn's interval: `[end − durationMs, end]` for a recorded turn, prompt to last reply for an
   estimated one. Before: AskUserQuestion was 55% of all tool time, one call 21 h, and 31 sessions had
-  more tool time than working time (f27623d1: 948 min against 47). After: none.
+  more tool time than working time (one: 948 min against 47). After: none.
 - **Turns one by one.** A prompt starts a turn (so does a reply after a recorded turn with no prompt
   in between). A turn with Claude Code's `turn_duration` takes it; one without is estimated from its
   prompt to its last reply, minus any time a recorded turn already covers (a prompt you queue
