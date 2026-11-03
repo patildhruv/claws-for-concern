@@ -23,16 +23,28 @@ enum Main {
 struct ClawsSearchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel()
+    @StateObject private var usage = UsageModel()
 
     var body: some Scene {
         // The app is "Claws Search" (Dock, menus, ⌘-Tab); its window says what it does, like the crab menu.
         Window("Search Sessions", id: "main") {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(usage)
                 .frame(minWidth: 820, minHeight: 480)
         }
         .defaultSize(width: 1180, height: 760)
         .commands { SessionCommands(model: model) }
+
+        // Every session's usage. Opened from the crab menu (Usage…) and from Search's toolbar; the same
+        // process, so the figures are read once.
+        Window("Usage", id: "usage") {
+            UsageWindow()
+                .environmentObject(model)
+                .environmentObject(usage)
+                .frame(minWidth: 900, minHeight: 560)
+        }
+        .defaultSize(width: 1280, height: 860)
     }
 }
 
@@ -237,7 +249,8 @@ enum Snapshot {
         func wait(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
         let model = AppModel()
-        while model.indexing { wait(0.2) }
+        let usage = UsageModel()
+        while model.indexing || usage.updated == nil { wait(0.2) }
         model.query = value("--query") ?? ""
         wait(0.5)
         if let first = model.hits.first?.id { model.selection = first }
@@ -246,7 +259,7 @@ enum Snapshot {
         // A little under the window's default size, so a 2x PNG for the README stays under ~400 KB.
         let size = NSSize(width: 1100, height: 700)
         // As in use: the key window's controls (the Resume button in clay, not inactive grey).
-        let host = NSHostingView(rootView: ContentView().environmentObject(model).environment(\.controlActiveState, .key)
+        let host = NSHostingView(rootView: ContentView().environmentObject(model).environmentObject(usage).environment(\.controlActiveState, .key)
             .frame(width: size.width, height: size.height))
         host.sceneBridgingOptions = [.toolbars, .title]
         let window = KeyLookingWindow(contentRect: NSRect(origin: .zero, size: size),

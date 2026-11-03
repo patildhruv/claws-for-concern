@@ -15,6 +15,7 @@ extension Color {
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // A split view, not a sidebar: the results are content, and a translucent sidebar would put
@@ -59,6 +60,11 @@ struct ContentView: View {
                 }
                 .help("Re-read changed transcripts (⌘R)")
                 .disabled(model.indexing)
+
+                Button { openWindow(id: "usage") } label: {
+                    Label("Usage", systemImage: "chart.bar.xaxis")
+                }
+                .help("Every session's usage and cost")
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
