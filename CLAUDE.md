@@ -328,6 +328,29 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   show exact agreement on every field; estimates within 3% of covering Claude Code figures.
 - Commands: `$H --usage <id prefix>`, `$H --usage-dump` (JSON), both with `--demo`;
   `tools/usage-crosscheck.py` after `./build.sh --no-install`.
+- **Screens** (Search: `UsagePanel.swift`, wording in `UsageText.swift`; window: `Usage{Window,Sections,
+  WindowModel,Report}.swift`, guide docs/usage-window.md). Both read one shared `UsageModel`. Every
+  estimate says "est.", cost is "at API prices", unknown is never $0, and every dollar goes through
+  `usage.money` (it adds the second currency). In Search, look figures up with `usage.usage(for:
+  session)`, never `bySession[id]`. In the window, rows and every total are per session ID
+  (`bySession`), never summed over `byFile`.
+- **Rows and the selection are keyed by transcript** (`Hit.id` = `Session.key`, the path). Copy ID,
+  Resume and searching by ID stay on the session ID. Other windows open a session only through
+  `AppModel.show(sessionID:projectDir:)`. It finishes in one main-thread turn, so a quick Return can
+  never resume a different session.
+- **The second currency is opt-in; off means no request at all.** Frankfurter v2, at most one GET a
+  day for all 16 currencies, fixed headers (`Frankfurter.headers`). The README's Privacy section
+  quotes the request, so change both together. `--demo` uses made-up rates.
+- **Usage… starts a new helper with `--window usage`.** That window is declared first because SwiftUI
+  opens the first scene and macOS 14 can't hold one back. A running helper is sent
+  `…search.openWindow {window, pid}` instead. Running sessions come from Claws' session files, read
+  only (`LiveSessions`).
+- **AA greys:** the system secondary label is 3.95:1 on white, under AA. Quiet text is
+  `Brand.quietText`, and graphic colours are in `UsageStyle`.
+- More commands: `$H --snapshot … [--select <id prefix>] [--sort cost] [--size WxH] [--usage-hidden]`
+  and `$H [--demo] --snapshot-usage out.png [--range 7d] [--appearance dark]` save no preference.
+  Without `--demo` they show your own sessions, so keep them in the scratchpad. `$H --currency-status`
+  makes no request; `$H --fetch-rates` makes one GET and stores nothing.
 
 ## Settings, placement, the Dock
 

@@ -40,7 +40,7 @@
 | `Sources/Search/Tokenizer.swift` | UTF-8 word tokenizer for the index and highlighting |
 | `Sources/Search/SearchIndex.swift` | `ParsedQuery`, `PhraseMatcher`, the inverted index, fuzzy word matching (bounded edit distance), ranking |
 | `Sources/Search/Snippets.swift` | Row previews and the detail pane's matching messages, highlighted; ANSI output for the CLI |
-| `Sources/Search/AppModel.swift` | The window's state: refresh, debounced background search, previews, selection; Return waits for fresh results; resume (through `ResumeClient`) and copy actions |
+| `Sources/Search/AppModel.swift` | The window's state: refresh, debounced background search, previews, selection (by transcript path); Return waits for fresh results; `show(sessionID:projectDir:)` for the Usage window; resume (through `ResumeClient`) and copy actions |
 | `Sources/Search/Views.swift` | Split view, results list (clay `SelectionBackground`), detail pane, `CrabThought` (empty states), `NSSearchField` wrapper (arrows move the selection, Return resumes, Esc clears) |
 | `Sources/Search/SelfTest.swift` | The helper's `--selftest`: unit checks plus searches picked from the real transcripts |
 | `Sources/Search/Usage.swift` | `SessionUsage` (the contract: tokens, context, compactions, cost and its source, turns, tools, subagents, API errors, days, lines; derived figures for the screens), `UsageStore` (every session's figures; links read through their targets, an ID filed twice read as one conversation; changed sessions read in batches, every file in pieces at once) |
@@ -51,6 +51,10 @@
 | `Sources/Search/DemoUsage.swift` | `--demo`'s usage figures: a spec per made-up session played through `UsageBuilder` |
 | `Sources/Search/UsageCLI.swift` | `--usage <id prefix>` (readable) and `--usage-dump` (JSON for the cross-check) |
 | `Sources/Search/UsageTests.swift` | The reader's self-test on made-up transcripts, the tables, the cache, the demo figures, the review's cases and random lines; invariants and timings on your own transcripts |
+| `Sources/Search/UsageModel.swift` | `UsageModel`: every session's figures for both windows, read once per refresh off the main thread (`bySession` per ID, `usage(for:)` per transcript); `money` (dollars plus the second currency); `UsageFormat` (dollars with "<$0.01", tokens, durations, percent, short model names) |
+| `Sources/Search/UsagePanel.swift` | Search's Usage section in the detail pane (context bar and chart, compactions, cost, tokens, by model, time, tools, subagents, API errors; folds to one line), the row's usage line, `ContextBar` |
+| `Sources/Search/UsageText.swift` | The words and numbers Search's panel and rows show (est., "at least", unknown, tool time, error kinds, MCP tool names); `UsageRank` for the Cost and Context sorts |
+| `Sources/Search/UsagePanelTests.swift` | Self-tests for Search's usage: wording, sorts, two copies of one ID, `show()` races, the one-reply chart |
 | `Sources/Search/UsageWindow.swift` | The Usage window (guide: docs/usage-window.md): toolbar filters, layout, status line; `HelperWindow` (which window opens at launch: `--window usage`), `WindowRequest` (Claws asks a running helper for a window), `CurrencyMenu`, `UsageBreakdown` |
 | `Sources/Search/UsageSections.swift` | Its sections: tiles, cost per day (Swift Charts, stacked, hover), near the context limit, all sessions (sortable `Table`, row actions), by project, by model, when Claude works; `UsageStyle` (colours that meet AA), row formatting |
 | `Sources/Search/UsageWindowModel.swift` | The window's state: filters, report, sort and selection, running sessions, Open in Search / Resume / Copy ID / Export CSV; `UsagePick` (the Session menu acts on the Usage row while it is in front) |
