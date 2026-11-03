@@ -174,6 +174,10 @@ enum SelfTest {
         let mean = latencies.isEmpty ? 0 : latencies.reduce(0, +) / Double(latencies.count)
         check("queries stay interactive", worst < 0.5, String(format: "mean %.0fms, worst %.0fms over %d", mean * 1000, worst * 1000, latencies.count))
 
+        // Search's usage panel and list: wording and sorting; then the window on the demo's figures.
+        for (name, ok) in UsagePanelTests.run() { check(name, ok) }
+        for (name, ok) in MainActor.assumeIsolated({ UsagePanelTests.window() }) { check(name, ok) }
+
         // Last: it switches the home folder for the whole process, and back.
         for (name, ok) in MainActor.assumeIsolated({ demo() }) { check(name, ok) }
 

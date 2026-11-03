@@ -167,15 +167,16 @@ enum UsageText {
             + " · longest \(UsageFormat.duration(u.turns.longestSeconds))"
     }
 
-    /// "418 calls · Read 71 · Edit 50 · …", the first `limit` tools by count; `all` lists every one.
-    static func tools(_ u: SessionUsage, limit: Int = 10) -> (text: String, all: String) {
+    /// "418 calls · Read 71 · Edit 50 · … · +4 more", the first `limit` tools by count; `all` lists
+    /// every one, a line each, for the tooltip.
+    static func tools(_ u: SessionUsage, limit: Int = 8) -> (text: String, all: String) {
         guard !u.tools.isEmpty else { return ("None", "") }
         // A no-break space, so a name and its count never wrap apart.
         let sorted = u.tools.sorted { ($0.value, $1.key) > ($1.value, $0.key) }
             .map { "\(UsageFormat.tool($0.key))\u{00A0}\($0.value.formatted(.number))" }
         let total = u.tools.values.reduce(0, +)
         var text = ([plural(total, "call")] + sorted.prefix(limit)).joined(separator: " · ")
-        if sorted.count > limit { text += " · and \(sorted.count - limit) more" }
+        if sorted.count > limit { text += " · +\(sorted.count - limit) more" }
         return (text, sorted.joined(separator: "\n"))
     }
 
@@ -191,9 +192,9 @@ enum UsageText {
         guard !all.isEmpty else { return ("None", [], 0) }
         let kinds = Dictionary(grouping: all, by: \.kind).map { (UsageFormat.errorKind($0.key), $0.value.count) }
             .sorted { ($0.1, $1.0) > ($1.1, $0.0) }
-        // One kind: its name says it all. Several: how many of each.
+        // One kind: its name says it all. Several: how many of each, and never "×1".
         let summary = all.count.formatted(.number) + " · "
-            + (kinds.count == 1 ? kinds[0].0 : kinds.map { "\($0.0)\u{00A0}×\($0.1)" }.joined(separator: ", "))
+            + (kinds.count == 1 ? kinds[0].0 : kinds.map { $0.1 > 1 ? "\($0.0)\u{00A0}×\($0.1)" : $0.0 }.joined(separator: ", "))
         let latest = all.sorted { $0.at > $1.at }.prefix(limit)
         let lines = latest.map { e -> (text: String, message: String?) in
             var t = when(e.at) + " · " + UsageFormat.errorKind(e.kind)
@@ -284,11 +285,23 @@ extension UsageFormat {
         }
     }
 
-    /// A tool's name: MCP tools (`mcp__server__tool`) as "tool (server)", the rest as Claude Code names them.
+    /// A tool's name: MCP tools (`mcp__<server>__<tool>`) as "server: tool", the rest as Claude Code
+    /// names them. The server loses the prefixes Claude Code adds: `plugin_<plugin>_` for a plugin's
+    /// server (`plugin_firebase_firebase` → firebase), `claude_ai_` for a claude.ai connector
+    /// (`claude_ai_Google_Drive` → Google Drive), and `claude-in-` (`claude-in-chrome` → chrome).
     static func tool(_ name: String) -> String {
         guard name.hasPrefix("mcp__") else { return name }
         let parts = name.dropFirst("mcp__".count).components(separatedBy: "__")
-        guard parts.count >= 2, !parts[0].isEmpty else { return name }
-        return parts.dropFirst().joined(separator: "__") + " (\(parts[0]))"
+        guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return name }
+        var server = parts[0]
+        if server.hasPrefix("plugin_") {
+            let rest = server.dropFirst("plugin_".count).split(separator: "_", maxSplits: 1).map(String.init)
+            server = rest.count == 2 ? rest[1] : rest.first ?? server
+        } else if server.hasPrefix("claude_ai_"), server.count > "claude_ai_".count {
+            server = String(server.dropFirst("claude_ai_".count))
+        } else if server.hasPrefix("claude-in-"), server.count > "claude-in-".count {
+            server = String(server.dropFirst("claude-in-".count))
+        }
+        return server.replacingOccurrences(of: "_", with: " ") + ": " + parts.dropFirst().joined(separator: "__")
     }
 }

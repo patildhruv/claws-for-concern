@@ -3,13 +3,9 @@ import AppKit
 import Charts
 import SwiftUI
 
-/// Colours for the usage figures. Text meets WCAG AA on Search's backgrounds (white, #F5F5F5, #F0F0F0;
-/// #1E1E1E, #262626, #2C2C2C), AAA with Increase Contrast; bar fills meet 3:1 there and on the selected
-/// row (docs/search.md "Usage" has the ratios).
+/// Colours for the usage graphics. Text uses `Brand.quietText` (AA on Search's backgrounds); bar fills
+/// meet 3:1 on them and on the selected row (docs/search.md "Usage" has the ratios).
 enum UsageStyle {
-    /// Quiet text. The system's secondary grey is 3.95:1 on white, under AA: #666666 is 5.74:1 (5.04:1
-    /// on #F0F0F0); dark #9A9A9A is 5.92:1 on #1E1E1E (4.96:1 on #2C2C2C).
-    static let quiet = adaptive(light: 0x666666, dark: 0x9A9A9A, lightHigh: 0x4D4D4D, darkHigh: 0xBDBDBD)
     /// A context bar's fill below the limit: 3.95:1 on white, 3.35:1 on the selected row (light);
     /// 5.92:1 and 3.97:1 (dark).
     static let fill = adaptive(light: 0x808080, dark: 0x9A9A9A, lightHigh: 0x5E5E5E, darkHigh: 0xBDBDBD)
@@ -30,8 +26,8 @@ enum UsageStyle {
 }
 
 extension Color {
-    /// Secondary text that meets AA (`UsageStyle.quiet`).
-    static let quiet = Color(nsColor: UsageStyle.quiet)
+    /// Secondary text that meets AA (`Brand.quietText`).
+    static let quiet = Color(nsColor: Brand.quietText)
 }
 
 /// How full the context is: grey, or clay once it is near the limit. The figure next to it says the
@@ -191,9 +187,11 @@ struct UsageDetails: View {
                     }
                 }
             }
-            GridRow {
-                DetailLabel("Per hour")
-                Text(UsageText.perHour(u, money: usage.money)).monospacedDigit()
+            if u.cost.usd != nil {      // with the cost unknown, so is this: the Cost row says why
+                GridRow {
+                    DetailLabel("Per hour")
+                    Text(UsageText.perHour(u, money: usage.money)).monospacedDigit()
+                }
             }
 
             heading("Time")
@@ -382,7 +380,7 @@ struct ContextChart: View {
 
     private func legend(window: Double?) -> String {
         var parts = ["After each reply"]
-        if !u.context.compactions.isEmpty { parts.append("upright lines: compactions") }
+        if !u.context.compactions.isEmpty { parts.append("vertical lines: compactions") }
         if window != nil { parts.append("dashed line: 80%, near the limit") }
         return parts.joined(separator: "; ")
     }

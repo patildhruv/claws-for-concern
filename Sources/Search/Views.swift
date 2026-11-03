@@ -340,7 +340,7 @@ struct DetailView: View {
 
     private var transcriptLine: String {
         var parts = [ByteCountFormatter.string(fromByteCount: Int64(session.fileSize), countStyle: .file),
-                     "\(session.promptCount) prompts"]
+                     "\(session.promptCount) prompt\(session.promptCount == 1 ? "" : "s")"]
         if session.subagentCount > 0 {
             parts.append("\(session.subagentCount) subagent transcript\(session.subagentCount == 1 ? "" : "s")")
         }
