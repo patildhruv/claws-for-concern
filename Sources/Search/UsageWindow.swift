@@ -61,21 +61,11 @@ struct UsageWindow: View {
                             .frame(minWidth: 300, idealWidth: 380, maxWidth: 420)
                     }
                     AllSessionsSection(open: open)
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 16) { breakdown }
-                        VStack(alignment: .leading, spacing: 22) { breakdown }
-                    }
+                    UsageBreakdown()
                 }
                 .padding(20)
             }
         }
-    }
-
-    @ViewBuilder
-    private var breakdown: some View {
-        ByProjectSection().frame(minWidth: 260, maxWidth: .infinity, alignment: .topLeading)
-        ByModelSection().frame(minWidth: 260, maxWidth: .infinity, alignment: .topLeading)
-        WhenClaudeWorksSection().frame(minWidth: 400, maxWidth: .infinity, alignment: .topLeading)
     }
 
     private func open(_ id: String) {
@@ -139,6 +129,23 @@ struct UsageWindow: View {
             .help("Read changed transcripts again")
             .disabled(usage.loading)
         }
+    }
+}
+
+/// By project, by model and when Claude works: side by side when they fit, else one under another.
+struct UsageBreakdown: View {
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 16) { parts }
+            VStack(alignment: .leading, spacing: 22) { parts }
+        }
+    }
+
+    @ViewBuilder
+    private var parts: some View {
+        ByProjectSection().frame(minWidth: 260, maxWidth: .infinity, alignment: .topLeading)
+        ByModelSection().frame(minWidth: 260, maxWidth: .infinity, alignment: .topLeading)
+        WhenClaudeWorksSection().frame(minWidth: 400, maxWidth: .infinity, alignment: .topLeading)
     }
 }
 

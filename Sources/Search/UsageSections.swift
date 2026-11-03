@@ -79,6 +79,24 @@ struct SectionTitle: View {
     }
 }
 
+/// Secondary text in a table cell: our grey on the plain row, the system's own secondary style on a
+/// selected row's accent colour (where a fixed grey would be unreadable).
+struct QuietText: View {
+    let text: String
+    var font: Font = .caption
+    @Environment(\.backgroundProminence) private var prominence
+
+    init(_ text: String, font: Font = .caption) {
+        self.text = text
+        self.font = font
+    }
+
+    var body: some View {
+        Text(text).font(font)
+            .foregroundStyle(prominence == .increased ? AnyShapeStyle(.secondary) : AnyShapeStyle(UsageStyle.secondaryText))
+    }
+}
+
 /// A rounded bar, filled to `fraction` of its width.
 struct UsageBar: View {
     let fraction: Double
@@ -98,11 +116,11 @@ struct UsageBar: View {
 // MARK: Formatting a row
 
 extension UsageRow {
-    /// "$12.40 est.", "≥ $3.10 est." when part could not be priced, "unknown" when none of it could.
-    @MainActor
-    func costText(_ usage: UsageModel) -> String {
+    /// "$12.40 est.", "≥ $3.10 est." when part could not be priced, "unknown" when none of it could. The
+    /// table writes the second currency (`UsageModel.secondMoney`) on a line of its own under it.
+    var dollarsText: String {
         guard let c = cost else { return "unknown" }
-        return (costPartial ? "≥ " : "") + usage.money(c) + (costEstimate ? " est." : "")
+        return (costPartial ? "≥ " : "") + UsageFormat.usd(c) + (costEstimate ? " est." : "")
     }
 
     var costHelp: String {
@@ -522,30 +540,40 @@ struct AllSessionsSection: View {
             TableColumn("Session", value: \UsageRow.title) { r in
                 VStack(alignment: .leading, spacing: 1) {
                     Text(r.title).lineLimit(1)
-                    Text(r.folder).font(.caption).foregroundStyle(UsageStyle.secondaryText).lineLimit(1).truncationMode(.middle)
+                    QuietText(r.folder).lineLimit(1).truncationMode(.middle)
                 }
                 // Titles truncate in the column: the whole name and folder on hover.
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .help("\(r.title)\n\(r.folder)")
             }
-            .width(min: 200, ideal: 232)
+            .width(min: 180, ideal: 214)
             TableColumn("Project", value: \UsageRow.projectName) { r in Text(r.projectName).lineLimit(1) }
-                .width(min: 70, ideal: 104)
+                .width(min: 64, ideal: 96)
             TableColumn("Last active", value: \UsageRow.lastActiveKey) { r in
                 Text(r.lastActiveText).lineLimit(1).help(r.lastActive?.formatted(date: .abbreviated, time: .shortened) ?? "")
             }
-            .width(min: 76, ideal: 86)
+            .width(min: 70, ideal: 82)
             TableColumn("Context", value: \UsageRow.contextKey) { r in ContextCell(row: r) }
-                .width(min: 96, ideal: 106)
+                .width(min: 90, ideal: 100)
             TableColumn("Compactions", value: \UsageRow.compactions) { r in
                 Text(r.compactions.formatted(.number)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .width(min: 66, ideal: 82)
+            .width(min: 62, ideal: 80)
             TableColumn("Cost", value: \UsageRow.costKey) { r in
-                Text(r.costText(usage)).monospacedDigit().lineLimit(1).frame(maxWidth: .infinity, alignment: .trailing).help(r.costHelp)
+                // The second currency on its own line under the dollars (rows are two lines anyway),
+                // so the column stays narrow when it is on.
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text(r.dollarsText).monospacedDigit().lineLimit(1)
+                    if let c = r.cost, let second = usage.secondMoney(c) {
+                        QuietText(second).monospacedDigit().lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .help(r.costHelp)
+                .accessibilityElement(children: .combine)
             }
-            .width(min: 86, ideal: 140)
+            .width(min: 80, ideal: 108)
             TableColumn("Written", value: \UsageRow.written) { r in
                 Text(UsageFormat.tokens(r.written)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
                     .help("\(r.written.formatted(.number)) output tokens")
@@ -554,12 +582,12 @@ struct AllSessionsSection: View {
             TableColumn("Claude time", value: \UsageRow.workSeconds) { r in
                 Text(UsageFormat.duration(r.workSeconds)).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .width(min: 66, ideal: 78)
+            .width(min: 62, ideal: 74)
             TableColumn("Lines", value: \UsageRow.linesKey) { r in
                 Text(r.linesText).monospacedDigit().lineLimit(1).frame(maxWidth: .infinity, alignment: .trailing)
                     .help(r.linesEstimate ? "Counted here from Edit and Write calls (est.)" : "Claude Code's own count")
             }
-            .width(min: 90, ideal: 136)
+            .width(min: 80, ideal: 120)
         }
         .contextMenu(forSelectionType: String.self) { ids in
             if let id = ids.first { RowActions(id: id, open: open) }
