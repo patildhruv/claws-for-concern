@@ -255,13 +255,16 @@ struct UsageDetails: View {
         if let text = UsageText.context(u) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    // In a narrow pane the bar gives way, never the figure.
                     if let f = u.contextFraction {
                         ContextBar(fraction: f, near: u.isNearContextLimit)
-                            .frame(width: 160, height: 8)
+                            .frame(minWidth: 48, maxWidth: 160)
+                            .frame(height: 8)
                             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
                     }
                     Text(text).monospacedDigit()
-                        .fixedSize(horizontal: false, vertical: true)
+                        .fixedSize()
+                        .layoutPriority(1)
                 }
                 if u.isNearContextLimit {
                     Text("Near the limit")
