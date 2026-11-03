@@ -3,7 +3,9 @@ import Foundation
 struct Hit: Identifiable {
     let session: Session
     let score: Float
-    var id: String { session.id }
+    /// The transcript (`Session.key`), not the session ID: an ID filed under two project folders is two
+    /// hits, and the list and the selection must tell them apart.
+    var id: String { session.key }
 }
 
 /// The search box, parsed. Bare words are fuzzy terms that must all match (AND).

@@ -95,6 +95,14 @@ share of the window; a model with no known window counts its tokens against 1M, 
 the list re-sorts when they change. Figures are looked up by transcript (`UsageModel.usage(for:)`):
 a session ID filed under two project folders is two rows, each with its own.
 
+**Rows are known by their transcript, not their session ID** (`Hit.id` = `Session.key`, the file's
+path): 8 IDs here are filed under two project folders, and keyed by ID the list had duplicate
+identities and the second copy could never be selected. The list, the selection and the excerpts use
+the key; Copy ID, Resume and searching by ID use the ID. The Usage window's "Open in Search" calls
+`AppModel.show(sessionID:projectDir:)`: the copy filed under that project folder (else the most
+recently active one), the query cleared if the results leave it out, waiting for the first read if
+it is still going; an ID Search does not know says so in the status line.
+
 ## Resuming a session
 
 The helper never scripts a terminal. It asks Claws for Concern, which already knows where every

@@ -378,7 +378,7 @@ struct DetailView: View {
 
     @ViewBuilder
     private var matches: some View {
-        let ready = model.excerptSessionID == session.id
+        let ready = model.excerptKey == session.key
         VStack(alignment: .leading, spacing: 10) {
             Text(heading(ready: ready))
                 .font(.headline)

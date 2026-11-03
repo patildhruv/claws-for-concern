@@ -84,6 +84,11 @@ struct Session: Identifiable {
     let promptCount: Int
     let messages: [Message]
 
+    /// What the list and the selection know a session by: its transcript's path. Unique, where `id` is
+    /// not (8 session IDs here are filed under two project folders, a transcript in each). Copy ID,
+    /// Resume and searching by ID use `id`.
+    var key: String { file.path }
+
     /// Text that is always searchable: names, folder, id, branch.
     var metaText: String {
         ([title] + altTitles + [cwd ?? projectDir, id, gitBranch ?? ""]).joined(separator: "\n")

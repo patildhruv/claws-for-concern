@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
             if sort != oldValue { runSearch(after: 0) }
         }
     }
+    /// The selected hit's `Hit.id`: its transcript (`Session.key`), not its session ID.
     @Published var selection: String? {
         didSet { if selection != oldValue { loadExcerpts() } }
     }
@@ -37,7 +38,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var snippets: [String: AttributedString] = [:]
     @Published private(set) var excerpts: [Excerpt] = []
     @Published private(set) var excerptTotal = 0
-    @Published private(set) var excerptSessionID: String?
+    /// The session (`Session.key`) the excerpts are for.
+    @Published private(set) var excerptKey: String?
     @Published private(set) var indexing = false
     @Published private(set) var sessionCount = 0
     @Published private(set) var indexNote = ""
@@ -61,6 +63,10 @@ final class AppModel: ObservableObject {
     private var ranks: [String: UsageRank] = [:]
     private weak var usage: UsageModel?
     private var usageWatch: AnyCancellable?
+    /// `show(sessionID:projectDir:)` waiting: for the index (`pendingShow`), or for results that hold
+    /// the session (`pendingSelection`, a `Session.key`).
+    private var pendingShow: (sessionID: String, projectDir: String?)?
+    private var pendingSelection: String?
 
     init(store: SessionStore = SessionStore()) {
         self.store = store
@@ -76,9 +82,32 @@ final class AppModel: ObservableObject {
 
     var selectedSession: Session? { session(selection) }
 
-    func session(_ id: String?) -> Session? {
-        guard let id else { return nil }
-        return hits.first { $0.id == id }?.session
+    /// The session among the results with this `Session.key`.
+    func session(_ key: String?) -> Session? {
+        guard let key else { return nil }
+        return hits.first { $0.id == key }?.session
+    }
+
+    /// Selects one session and makes sure the list shows it: for the Usage window's "Open in Search".
+    /// Of the transcripts with that ID, the one filed under `projectDir` (Claude Code's folder name,
+    /// `Session.projectDir` and `SessionUsage.projectDir`), else the most recently active. If the
+    /// results on screen leave it out, the query is cleared (an empty query lists every session). Called
+    /// before the first read finishes, it waits for it. An ID Search does not know says so in the status line.
+    func show(sessionID: String, projectDir: String?) {
+        guard let index else { pendingShow = (sessionID, projectDir); return }
+        let copies = index.sessions.filter { $0.id == sessionID }
+        guard let pick = copies.first(where: { $0.projectDir == projectDir }) ?? copies.max(by: { $0.modified < $1.modified }) else {
+            show(flash: "That session is not in Search any more.")
+            return
+        }
+        resumeFirstHit = false
+        if hits.contains(where: { $0.id == pick.key }) {
+            pendingSelection = nil
+            selection = pick.key
+            return
+        }
+        pendingSelection = pick.key
+        if query.trimmingCharacters(in: .whitespaces).isEmpty { runSearch(after: 0) } else { query = "" }
     }
 
     var statusLine: String {
@@ -136,6 +165,10 @@ final class AppModel: ObservableObject {
             indexNote = String(format: "indexed in %.1f s", seconds)
             runSearch(after: 0)
         }
+        if let p = pendingShow, index != nil {
+            pendingShow = nil
+            show(sessionID: p.sessionID, projectDir: p.projectDir)
+        }
         if refreshQueued {
             refreshQueued = false
             refresh()
@@ -177,13 +210,20 @@ final class AppModel: ObservableObject {
             resumeFirstHit = false
             if let first = hits.first { resume(first.session) }
         }
-        if let sel = selection, hits.contains(where: { $0.id == sel }) {
+        if let want = pendingSelection, hits.contains(where: { $0.id == want }) {
+            // A session asked for by `show(sessionID:projectDir:)`.
+            pendingSelection = nil
+            if selection == want { loadExcerpts() } else { selection = want }
+        } else if let sel = selection, hits.contains(where: { $0.id == sel }) {
+            // Every session, and not that one: it went in a refresh. Stop waiting for it.
+            if pendingSelection != nil && raw.trimmingCharacters(in: .whitespaces).isEmpty { pendingSelection = nil }
             loadExcerpts()
         } else {
+            if pendingSelection != nil && raw.trimmingCharacters(in: .whitespaces).isEmpty { pendingSelection = nil }
             // Next runloop turn, so the List has applied the new rows before selection moves.
             let first = hits.first?.id
             DispatchQueue.main.async { [weak self] in
-                guard let self, gen == self.generation else { return }
+                guard let self, gen == self.generation, self.pendingSelection == nil else { return }
                 self.selection = first
                 if first == nil { self.excerpts = []; self.excerptTotal = 0 }
             }
@@ -198,22 +238,22 @@ final class AppModel: ObservableObject {
     private func loadExcerpts() {
         excerptTask?.cancel()
         guard let s = selectedSession else {
-            excerpts = []; excerptTotal = 0; excerptSessionID = nil
+            excerpts = []; excerptTotal = 0; excerptKey = nil
             return
         }
         let out = outcome
         excerptTask = Task.detached(priority: .userInitiated) { [weak self] in
             let (items, total) = Snippets.list(s, out, limit: 300)
             guard !Task.isCancelled else { return }
-            await self?.showExcerpts(items, total: total, for: s.id)
+            await self?.showExcerpts(items, total: total, for: s.key)
         }
     }
 
-    private func showExcerpts(_ items: [Excerpt], total: Int, for id: String) {
-        guard id == selection else { return }
+    private func showExcerpts(_ items: [Excerpt], total: Int, for key: String) {
+        guard key == selection else { return }
         excerpts = items
         excerptTotal = total
-        excerptSessionID = id
+        excerptKey = key
     }
 
     func moveSelection(_ delta: Int) {

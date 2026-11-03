@@ -181,26 +181,91 @@ enum UsagePanelTests {
             return zip(known, known.dropFirst()).allSatisfy { $0 >= $1 } && costs.dropFirst(known.count).allSatisfy { $0 == nil }
         }
         wait(10) { !model.indexing && model.hits.count == sessions.count }
-        let recent = model.hits.map(\.id)
+        let recent = model.hits.map(\.session.id)
         model.sort = .cost
-        wait(2) { model.hits.map(\.id) != recent }
-        check("window: without figures, Cost keeps the newest first", model.hits.map(\.id) == recent)
+        wait(2) { model.hits.map(\.session.id) != recent }
+        check("window: without figures, Cost keeps the newest first", model.hits.map(\.session.id) == recent)
         model.setUsage(figures)
-        wait(5) { byCost(model.hits.map(\.id)) }
+        wait(5) { byCost(model.hits.map(\.session.id)) }
         check("window: figures arriving re-sort the list by cost, unknown last",
-              byCost(model.hits.map(\.id)) && model.hits.last?.id == "3e8a2c6f-9b14-4d7e-b2a5-7f0c1e9d4b68")
-        let costOrder = model.hits.map(\.id)
+              byCost(model.hits.map(\.session.id)) && model.hits.last?.session.id == "3e8a2c6f-9b14-4d7e-b2a5-7f0c1e9d4b68")
+        let costOrder = model.hits.map(\.session.id)
         model.refresh()
         wait(5) { !model.indexing }
         wait(0.5) { false }
-        check("window: the sort survives a refresh", model.sort == .cost && model.hits.map(\.id) == costOrder)
+        check("window: the sort survives a refresh", model.sort == .cost && model.hits.map(\.session.id) == costOrder)
         model.query = "rate limit"
-        wait(5) { model.hits.count < sessions.count && byCost(model.hits.map(\.id)) }
-        check("window: a search's hits sort by cost too", model.hits.count < sessions.count && byCost(model.hits.map(\.id)))
+        wait(5) { model.hits.count < sessions.count && byCost(model.hits.map(\.session.id)) }
+        check("window: a search's hits sort by cost too", model.hits.count < sessions.count && byCost(model.hits.map(\.session.id)))
         model.query = ""
         model.sort = .context
-        wait(5) { model.hits.first?.id == "b1f7e3a9-4c62-4e8d-95b0-6a3d8c2f1e74" }
-        check("window: Context puts the session near its limit first", model.hits.first?.id == "b1f7e3a9-4c62-4e8d-95b0-6a3d8c2f1e74")
+        wait(5) { model.hits.first?.session.id == "b1f7e3a9-4c62-4e8d-95b0-6a3d8c2f1e74" }
+        check("window: Context puts the session near its limit first", model.hits.first?.session.id == "b1f7e3a9-4c62-4e8d-95b0-6a3d8c2f1e74")
+        return out
+    }
+
+    /// One session ID filed under two project folders (a copied transcript), and a third session: two
+    /// rows the list tells apart, each with its own figures, and `show(sessionID:projectDir:)` picks the
+    /// copy asked for, clearing a query that hides it.
+    @MainActor
+    static func copies() -> [(String, Bool)] {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("claws-copies-\(getpid())")
+        defer { try? fm.removeItem(at: base) }
+        let projects = base.appendingPathComponent("projects")
+        let dup = "2c2b2a29-2827-4625-a423-222120191817", other = "3d3c3b3a-3938-4736-b534-333231302f2e"
+        let folders = ["first", "second", "third"].map { base.appendingPathComponent($0).path }
+        // Folder, session ID, day in October, the prompt, output tokens.
+        let files = [(0, dup, "01", "alpha copy", 100), (1, dup, "02", "beta copy", 200), (2, other, "03", "zebra crossing", 300)]
+        for (f, id, day, words, output) in files {
+            try? fm.createDirectory(atPath: folders[f], withIntermediateDirectories: true)
+            let dir = projects.appendingPathComponent(ProjectDirs.name(for: folders[f]))
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            let user = #"{"type":"user","cwd":"\#(folders[f])","timestamp":"2026-10-\#(day)T10:00:00.000Z","message":{"content":"\#(words)"}}"#
+            let reply = #"{"type":"assistant","cwd":"\#(folders[f])","timestamp":"2026-10-\#(day)T10:01:00.000Z","message":{"id":"msg_\#(day)","#
+                + #""model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"#
+                + #""output_tokens":\#(output),"cache_read_input_tokens":0,"cache_creation_input_tokens":1000}}}"#
+            fm.createFile(atPath: dir.appendingPathComponent(id + ".jsonl").path, contents: Data((user + "\n" + reply + "\n").utf8))
+        }
+        var out: [(String, Bool)] = []
+        func check(_ name: String, _ ok: Bool) { out.append(("usage panel: copies: " + name, ok)) }
+        func wait(_ seconds: Double, until done: () -> Bool) {
+            let end = Date().addingTimeInterval(seconds)
+            while !done() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        }
+        let model = AppModel(store: SessionStore(root: projects))
+        model.remembers = false
+        let usage = UsageModel(store: UsageStore(root: projects, cache: nil))
+        model.attach(usage)
+        // Asked for before the first read is done: it waits for it.
+        model.show(sessionID: dup, projectDir: ProjectDirs.name(for: folders[0]))
+        wait(10) { !model.indexing && usage.updated != nil && model.hits.count == 3 && model.selectedSession?.cwd == folders[0] }
+        let twins = model.hits.filter { $0.session.id == dup }
+        check("one ID filed twice is two rows, each its own identity",
+              model.hits.count == 3 && twins.count == 2 && Set(model.hits.map(\.id)).count == 3)
+        check("shown before the first read: the copy asked for", model.selectedSession?.cwd == folders[0])
+        let second = twins.first { $0.session.cwd == folders[1] }?.session
+        if let second { model.selection = second.key }
+        check("the second copy can be selected and shown", second != nil && model.selectedSession?.cwd == folders[1]
+              && model.selectedSession?.projectDir == ProjectDirs.name(for: folders[1]))
+        wait(5) { model.excerptKey == second?.key }
+        check("its excerpts are its own", model.excerptKey == second?.key && model.excerpts.contains { String($0.text.characters).contains("beta") })
+        let figures = twins.map { usage.usage(for: $0.session)?.tokens.output }
+        check("each copy has its own figures", Set(figures.compactMap { $0 }) == [100, 200])
+
+        model.show(sessionID: dup, projectDir: ProjectDirs.name(for: folders[0]))
+        check("show picks the copy filed under the folder asked for", model.selectedSession?.cwd == folders[0])
+        model.show(sessionID: dup, projectDir: nil)
+        check("with no folder, the most recently active copy", model.selectedSession?.cwd == folders[1])
+        model.query = "zebra"
+        wait(5) { model.hits.count == 1 }
+        model.show(sessionID: dup, projectDir: ProjectDirs.name(for: folders[0]))
+        wait(5) { model.query.isEmpty && model.selectedSession?.cwd == folders[0] }
+        check("a query that hides it is cleared, then the copy is selected",
+              model.query.isEmpty && model.hits.count == 3 && model.selectedSession?.cwd == folders[0])
+        model.show(sessionID: "00000000-0000-4000-8000-000000000000", projectDir: nil)
+        check("an ID Search does not know says so, the selection stays",
+              model.flash?.contains("not in Search") == true && model.selectedSession?.cwd == folders[0])
         return out
     }
 }

@@ -258,7 +258,7 @@ enum Snapshot {
         if args.contains("--usage-hidden") { model.usageShown = false }
         model.query = value("--query") ?? ""
         wait(0.5)
-        let pick = value("--select").flatMap { p in model.hits.first { $0.id.hasPrefix(p) } } ?? model.hits.first
+        let pick = value("--select").flatMap { p in model.hits.first { $0.session.id.hasPrefix(p) } } ?? model.hits.first
         if let pick { model.selection = pick.id }
         wait(1.5)   // the row previews and the detail pane
 
