@@ -39,7 +39,8 @@ final class AppModel: ObservableObject {
     /// What Resume does with a session: ask Claws for Concern. The self-test records it instead.
     var resumer: (Session) -> Void = { ResumeClient.shared.resume($0) }
 
-    private var index: SearchIndex?
+    /// Read by the Usage window for every session's name and folder (`AppModel+Usage.swift`).
+    private(set) var index: SearchIndex?
     private var outcome: SearchOutcome?
     private let store: SessionStore
     private var searchTask: Task<Void, Never>?

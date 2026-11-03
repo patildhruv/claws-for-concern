@@ -131,6 +131,8 @@ struct UsageReport {
         var day: Date
         var series: String
         var cost: Double
+        /// Where this part starts in the day's stack: the series before it (in `series` order) below.
+        var start = 0.0
         var id: String { "\(day.timeIntervalSince1970)|\(series)" }
     }
 
@@ -185,7 +187,7 @@ struct UsageReport {
     static let otherSeries = "Other projects"
 
     static func build(usage: [String: SessionUsage], info: [String: SessionInfo], live: Set<String>,
-                      filter: UsageFilter, now: Date, calendar: Calendar = .current) -> UsageReport {
+                      filter: UsageFilter, now: Date, calendar: Calendar = .usage) -> UsageReport {
         var r = UsageReport()
         r.filter = filter
         r.sessionCount = usage.count
@@ -307,6 +309,15 @@ struct UsageReport {
             let name = names[k] ?? k
             return present.contains(name) ? Series(name: name, slot: i) : nil
         } + (present.contains(otherSeries) ? [Series(name: otherSeries, slot: nil)] : [])
+        // Stacked in the legend's order, the same on every day.
+        let rank = Dictionary(uniqueKeysWithValues: r.series.enumerated().map { ($1.name, $0) })
+        r.days.sort { ($0.day, rank[$0.series] ?? 99) < ($1.day, rank[$1.series] ?? 99) }
+        var below: (day: Date, sum: Double)?
+        for i in r.days.indices {
+            let base = below.map { $0.day == r.days[i].day ? $0.sum : 0 } ?? 0
+            r.days[i].start = base
+            below = (r.days[i].day, base + r.days[i].cost)
+        }
 
         // By project.
         var byProject: [String: ProjectTotal] = [:]
@@ -367,9 +378,9 @@ struct UsageReport {
     }
 
     /// A session's figures for the range. All time: its own totals. A range: its days on or after
-    /// `from`; cost per day scaled to Claude Code's figure (`cost(of:)`). Lines have no per-day split:
-    /// a session wholly inside the range keeps its own count, one that started earlier gets the share
-    /// of its lines that matches the share of its output written in the range, marked est.
+    /// `from`, cost and lines per day scaled to Claude Code's figures (`cost(of:)`, `lines(of:)`). A
+    /// session wholly inside the range keeps its own line count; one cut by the range gets its days'
+    /// share, marked est. (the split by day is counted here, not Claude Code's).
     static func fill(_ row: inout UsageRow, _ u: SessionUsage, from: String?, calendar: Calendar) {
         guard let from else {
             row.cost = u.cost.usd
@@ -395,9 +406,11 @@ struct UsageReport {
             row.linesRemoved = u.lines.removed
             row.linesEstimate = u.lines.source == .estimate
         } else {
-            let share = outputShare(u, from: from)
-            row.linesAdded = Int((Double(u.lines.added) * share).rounded())
-            row.linesRemoved = Int((Double(u.lines.removed) * share).rounded())
+            for d in u.days where d.date >= from {
+                let l = u.lines(of: d)
+                row.linesAdded += l.added
+                row.linesRemoved += l.removed
+            }
             row.linesEstimate = true
         }
     }
@@ -421,7 +434,7 @@ struct UsageReport {
 /// Export CSV: the rows the filters show, figures as plain numbers (dot decimals, no symbols), UTF-8
 /// with a byte order mark so Excel reads ₹ and accents, CRLF line ends (RFC 4180).
 enum UsageCSV {
-    static func make(_ rows: [UsageRow], second: UsageModel.SecondCurrency?, calendar: Calendar = .current) -> String {
+    static func make(_ rows: [UsageRow], second: UsageModel.SecondCurrency?, calendar: Calendar = .usage) -> String {
         var header = ["Session", "Project", "Folder", "Session ID", "Last active", "Context tokens", "Context %",
                       "Compactions", "Cost (USD at API prices)", "Cost source"]
         if let s = second { header.append("Cost (\(s.code) at \(number(s.perUSD, 4)) per USD, \(UsageDay.key(s.date, calendar)))") }
@@ -433,11 +446,16 @@ enum UsageCSV {
         for r in rows {
             let source: String
             if r.cost == nil { source = "unknown" } else { source = (r.costEstimate ? "estimate" : "Claude Code") + (r.costPartial ? ", part unpriced" : "") }
-            var cells = [field(r.title, text: true), field(r.projectName, text: true), field(r.folder, text: true), field(r.id),
-                         r.lastActive.map { iso.string(from: $0) } ?? "", r.contextNow.map(String.init) ?? "",
-                         r.contextFraction.map { number($0 * 100, 1) } ?? "", String(r.compactions),
-                         r.cost.map { number($0, 4) } ?? "", field(source)]
-            if let s = second { cells.append(r.cost.map { number($0 * s.perUSD, 2) } ?? "") }
+            let last: String = r.lastActive.map { iso.string(from: $0) } ?? ""
+            let context: String = r.contextNow.map { String($0) } ?? ""
+            let share: String = r.contextFraction.map { number($0 * 100, 1) } ?? ""
+            let cost: String = r.cost.map { number($0, 4) } ?? ""
+            var cells: [String] = [field(r.title, text: true), field(r.projectName, text: true), field(r.folder, text: true), field(r.id)]
+            cells += [last, context, share, String(r.compactions), cost, field(source)]
+            if let s = second {
+                let converted: String = r.cost.map { number($0 * s.perUSD, 2) } ?? ""
+                cells.append(converted)
+            }
             cells += [String(r.written), number(r.workSeconds / 3600, 2), String(r.linesAdded), String(r.linesRemoved),
                       r.linesEstimate ? "estimate" : "Claude Code"]
             lines.append(cells.joined(separator: ","))
@@ -464,7 +482,7 @@ enum UsageCSV {
     }
 
     /// "Claude Code usage, last 30 days, 2026-11-03.csv".
-    static func fileName(_ range: UsageRange, now: Date, calendar: Calendar = .current) -> String {
+    static func fileName(_ range: UsageRange, now: Date, calendar: Calendar = .usage) -> String {
         let span: String
         switch range {
         case .today: span = "today"
