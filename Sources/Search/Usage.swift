@@ -250,6 +250,9 @@ final class UsageStore: @unchecked Sendable {
         byPath[file.path] ?? byID[file.deletingPathExtension().lastPathComponent]
     }
 
+    /// Every transcript's figures by its path, as of the last `load()`; read on the thread that called it.
+    var byTranscript: [String: SessionUsage] { byPath }
+
     init(root: URL = URL(fileURLWithPath: Paths.home).appendingPathComponent(".claude/projects", isDirectory: true),
          cache: UsageCache? = UsageCache()) {
         self.root = root
