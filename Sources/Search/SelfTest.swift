@@ -133,7 +133,7 @@ enum SelfTest {
             let t = CFAbsoluteTimeGetCurrent()
             let out = index.search(ParsedQuery(query), scope: scope, sort: .relevance) { false }!
             latencies.append(CFAbsoluteTimeGetCurrent() - t)
-            return out.hits.firstIndex { $0.id == s.id }
+            return out.hits.firstIndex { $0.session.id == s.id }     // either copy of an ID filed twice
         }
         func show(_ r: Int?) -> String { r.map { "rank \($0 + 1)" } ?? "not found" }
 
@@ -154,7 +154,7 @@ enum SelfTest {
 
         if let s = picks.first(where: { samplePhrase(in: $0) != nil }), let phrase = samplePhrase(in: s) {
             let out = index.search(ParsedQuery("\"\(phrase)\""), scope: .standard, sort: .relevance) { false }!
-            check("phrase \"\(phrase)\" finds \(s.id.prefix(8))", out.hits.contains { $0.id == s.id }, "\(out.hits.count) hits")
+            check("phrase \"\(phrase)\" finds \(s.id.prefix(8))", out.hits.contains { $0.session.id == s.id }, "\(out.hits.count) hits")
             let verbatim = out.hits.allSatisfy { hit in
                 hit.session.metaText.range(of: phrase, options: .caseInsensitive) != nil ||
                 hit.session.messages.contains { $0.text.range(of: phrase, options: .caseInsensitive) != nil }
@@ -177,6 +177,12 @@ enum SelfTest {
         // Usage figures: the reader on made-up transcripts, the tables, the cache, the demo's figures,
         // then your own transcripts (docs/usage.md).
         for (name, ok) in UsageTests.run() + UsageTests.real() { check(name, ok) }
+
+        // Search's usage panel and list: wording and sorting; then the window on the demo's figures.
+        for (name, ok) in UsagePanelTests.run() { check(name, ok) }
+        for (name, ok) in MainActor.assumeIsolated({
+            UsagePanelTests.window() + UsagePanelTests.copies() + UsagePanelTests.races() + UsagePanelTests.chart()
+        }) { check(name, ok) }
 
         // Last: it switches the home folder for the whole process, and back.
         for (name, ok) in MainActor.assumeIsolated({ demo() }) { check(name, ok) }
@@ -321,17 +327,17 @@ enum SelfTest {
             let end = Date().addingTimeInterval(seconds)
             while !done() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
         }
-        wait(10) { !model.indexing && model.selection == ids[1] }
-        var out: [(String, Bool)] = [("window: the newest session is selected first", model.selection == ids[1])]
+        wait(10) { !model.indexing && model.selectedSession?.id == ids[1] }
+        var out: [(String, Bool)] = [("window: the newest session is selected first", model.selectedSession?.id == ids[1])]
         model.query = "zebra"
         model.resumeSelected()
         out.append(("window: Return before the new results waits for them", resumed.isEmpty))
         wait(5) { !resumed.isEmpty }
         out.append(("window: then resumes the new first hit, not the old selection", resumed == [ids[0]]))
-        let byID = Dictionary(uniqueKeysWithValues: model.hits.map { ($0.id, $0.session) })
+        let byID = Dictionary(uniqueKeysWithValues: model.hits.map { ($0.session.id, $0.session) })
         model.query = ""
         wait(5) { model.hits.count == 3 }
-        let all = Dictionary(uniqueKeysWithValues: model.hits.map { ($0.id, $0.session) }).merging(byID) { a, _ in a }
+        let all = Dictionary(uniqueKeysWithValues: model.hits.map { ($0.session.id, $0.session) }).merging(byID) { a, _ in a }
         out.append(("window: a session whose folder is gone cannot be resumed",
                     all[ids[0]]?.canResume == true && all[ids[2]]?.whyNotResumable == "Its folder no longer exists"))
         return out

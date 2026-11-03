@@ -3,7 +3,9 @@ import Foundation
 struct Hit: Identifiable {
     let session: Session
     let score: Float
-    var id: String { session.id }
+    /// The transcript (`Session.key`), not the session ID: an ID filed under two project folders is two
+    /// hits, and the list and the selection must tell them apart.
+    var id: String { session.key }
 }
 
 /// The search box, parsed. Bare words are fuzzy terms that must all match (AND).
@@ -222,10 +224,13 @@ final class SearchIndex: @unchecked Sendable {
 
     // MARK: Search
 
-    func search(_ q: ParsedQuery, scope: Scope, sort: SortMode, cancelled: () -> Bool) -> SearchOutcome? {
+    /// `ranks` are the usage figures Cost and Context sort by (`UsageRank`), keyed by session ID.
+    func search(_ q: ParsedQuery, scope: Scope, sort: SortMode, ranks: [String: UsageRank] = [:],
+                cancelled: () -> Bool) -> SearchOutcome? {
         let n = sessions.count
         guard !q.isEmpty else {
-            let hits = sessions.sorted { $0.modified > $1.modified }.map { Hit(session: $0, score: 0) }
+            var hits = sessions.sorted { $0.modified > $1.modified }.map { Hit(session: $0, score: 0) }
+            if sort.usesFigures { UsageRank.order(&hits, by: sort, ranks: ranks) }
             return SearchOutcome(hits: hits, query: q, scope: scope, termWords: [])
         }
         let allowed = scope.union(.meta).rawValue
@@ -281,6 +286,8 @@ final class SearchIndex: @unchecked Sendable {
             hits.sort { $0.score != $1.score ? $0.score > $1.score : $0.session.modified > $1.session.modified }
         case .recent:
             hits.sort { $0.session.modified > $1.session.modified }
+        case .cost, .context:
+            UsageRank.order(&hits, by: sort, ranks: ranks)
         }
         return SearchOutcome(hits: hits, query: q, scope: scope, termWords: termWords)
     }

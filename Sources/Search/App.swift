@@ -234,9 +234,10 @@ enum CLI {
     }
 }
 
-/// `--snapshot <png> [--query <q>] [--appearance light|dark]`: indexes, searches, selects the first hit,
-/// renders the window offscreen and quits. With `--demo`, only made-up sessions (the README's pictures).
-/// It never shows a window or takes focus, and needs no screen recording permission.
+/// `--snapshot <png> [--query <q>] [--appearance light|dark] [--sort relevance|recent|cost|context]
+/// [--select <id prefix>] [--size WxH] [--usage-hidden]`: indexes, searches, selects the first hit (or
+/// the one given), renders the window offscreen and quits. With `--demo`, only made-up sessions (the
+/// README's pictures). It never shows a window or takes focus, and needs no screen recording permission.
 enum Snapshot {
     @MainActor
     static func run(_ args: [String]) -> Int32 {
@@ -249,15 +250,21 @@ enum Snapshot {
         func wait(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
         let model = AppModel()
+        model.remembers = false     // --sort and --usage-hidden are for this picture, not your next search
         let usage = UsageModel()
+        model.attach(usage)
         while model.indexing || usage.updated == nil { wait(0.2) }
+        if let sort = value("--sort").flatMap(SortMode.init(rawValue:)) { model.sort = sort }
+        if args.contains("--usage-hidden") { model.usageShown = false }
         model.query = value("--query") ?? ""
         wait(0.5)
-        if let first = model.hits.first?.id { model.selection = first }
+        let pick = value("--select").flatMap { p in model.hits.first { $0.session.id.hasPrefix(p) } } ?? model.hits.first
+        if let pick { model.selection = pick.id }
         wait(1.5)   // the row previews and the detail pane
 
         // A little under the window's default size, so a 2x PNG for the README stays under ~400 KB.
-        let size = NSSize(width: 1100, height: 700)
+        let wh = value("--size")?.split(separator: "x").compactMap { Double($0) } ?? []
+        let size = wh.count == 2 ? NSSize(width: wh[0], height: wh[1]) : NSSize(width: 1100, height: 700)
         // As in use: the key window's controls (the Resume button in clay, not inactive grey).
         let host = NSHostingView(rootView: ContentView().environmentObject(model).environmentObject(usage).environment(\.controlActiveState, .key)
             .frame(width: size.width, height: size.height))

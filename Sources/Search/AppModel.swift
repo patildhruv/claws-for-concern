@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
@@ -7,30 +8,39 @@ final class AppModel: ObservableObject {
         didSet {
             guard query != oldValue else { return }
             resumeFirstHit = false      // typing after Return changes your mind
-            runSearch(after: 0.12)
+            pendingShow = nil           // and after Open in Search, too
+            if !showing { runSearch(after: 0.12) }
         }
     }
-    // Your choices are remembered, except in the demo, which always starts from the defaults.
+    // Your choices are remembered, except in the demo, which always starts from the defaults, and in a
+    // snapshot, which sets them from its flags.
+    var remembers = !Demo.active
     @Published var scope: Scope {
         didSet {
-            if !Demo.active { UserDefaults.standard.set(Int(scope.rawValue), forKey: "scope") }
+            if remembers { UserDefaults.standard.set(Int(scope.rawValue), forKey: "scope") }
             if scope != oldValue { runSearch(after: 0) }
         }
     }
     @Published var sort: SortMode {
         didSet {
-            if !Demo.active { UserDefaults.standard.set(sort.rawValue, forKey: "sort") }
+            if remembers { UserDefaults.standard.set(sort.rawValue, forKey: "sort") }
             if sort != oldValue { runSearch(after: 0) }
         }
     }
+    /// The selected hit's `Hit.id`: its transcript (`Session.key`), not its session ID.
     @Published var selection: String? {
         didSet { if selection != oldValue { loadExcerpts() } }
+    }
+    /// The detail pane's Usage section open or folded away (remembered, except in the demo).
+    @Published var usageShown: Bool {
+        didSet { if remembers { UserDefaults.standard.set(usageShown, forKey: "usageShown") } }
     }
     @Published private(set) var hits: [Hit] = []
     @Published private(set) var snippets: [String: AttributedString] = [:]
     @Published private(set) var excerpts: [Excerpt] = []
     @Published private(set) var excerptTotal = 0
-    @Published private(set) var excerptSessionID: String?
+    /// The session (`Session.key`) the excerpts are for.
+    @Published private(set) var excerptKey: String?
     @Published private(set) var indexing = false
     @Published private(set) var sessionCount = 0
     @Published private(set) var indexNote = ""
@@ -50,12 +60,22 @@ final class AppModel: ObservableObject {
     /// The search the results on screen came from; Return waits until they match the field.
     private var shown: (generation: Int, query: String)?
     private var resumeFirstHit = false
+    /// Each session's cost and context, for the Cost and Context sorts (`setUsage`).
+    private var ranks: [String: UsageRank] = [:]
+    private weak var usage: UsageModel?
+    private var usageWatch: AnyCancellable?
+    /// `show(sessionID:projectDir:)` called before the first read finished: done when it does, unless
+    /// you type first.
+    private var pendingShow: (sessionID: String, projectDir: String?)?
+    /// Set while `show` clears the query itself, so that does not start a search or cancel the show.
+    private var showing = false
 
     init(store: SessionStore = SessionStore()) {
         self.store = store
         let saved = Demo.active ? nil : UserDefaults.standard.object(forKey: "scope") as? Int
         scope = saved.map { Scope(rawValue: UInt8(truncatingIfNeeded: $0)) } ?? .standard
         sort = Demo.active ? .relevance : SortMode(rawValue: UserDefaults.standard.string(forKey: "sort") ?? "") ?? .relevance
+        usageShown = Demo.active ? true : UserDefaults.standard.object(forKey: "usageShown") as? Bool ?? true
         ResumeClient.shared.show = { [weak self] in self?.show(flash: $0) }
         // Made-up sessions: nothing to resume, and nothing is ever sent to Claws for Concern.
         if Demo.active { resumer = { [weak self] _ in self?.show(flash: "Demo sessions: there is nothing to resume.") } }
@@ -64,9 +84,53 @@ final class AppModel: ObservableObject {
 
     var selectedSession: Session? { session(selection) }
 
-    func session(_ id: String?) -> Session? {
-        guard let id else { return nil }
-        return hits.first { $0.id == id }?.session
+    /// The session among the results with this `Session.key`.
+    func session(_ key: String?) -> Session? {
+        guard let key else { return nil }
+        return hits.first { $0.id == key }?.session
+    }
+
+    /// Selects one session and makes sure the list shows it: for the Usage window's "Open in Search".
+    /// Of the transcripts with that ID, the one filed under `projectDir` (Claude Code's folder name,
+    /// `Session.projectDir` and `SessionUsage.projectDir`), else the most recently active (ties: by path).
+    /// Done in one go, so nothing can come between: a search still on its way is dropped, a Return
+    /// waiting for one resumes nothing, and unless the results on screen are current and hold the
+    /// session, the query is cleared and every session listed at once. Called before the first read
+    /// finishes, it waits for it; typing meanwhile cancels it. An ID Search does not know says so in
+    /// the status line.
+    func show(sessionID: String, projectDir: String?) {
+        guard let index else { pendingShow = (sessionID, projectDir); return }
+        pendingShow = nil
+        guard let pick = Self.pick(index.sessions.filter { $0.id == sessionID }, projectDir: projectDir) else {
+            show(flash: "That session is not in Search any more.")
+            return
+        }
+        resumeFirstHit = false
+        let current = shown.map { $0.generation == generation && $0.query == query } ?? false
+        if current, hits.contains(where: { $0.id == pick.key }) {
+            selection = pick.key
+            return
+        }
+        // Every session, now: the empty query's results are the sessions sorted, a few ms.
+        searchTask?.cancel()
+        showing = true
+        query = ""
+        showing = false
+        generation += 1
+        let gen = generation
+        guard let out = index.search(ParsedQuery(""), scope: scope, sort: sort, ranks: ranks, cancelled: { false }) else { return }
+        show(out, generation: gen, query: "", select: pick.key)
+        searchTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let map = Snippets.rows(Array(out.hits.prefix(150)), out)
+            guard !Task.isCancelled else { return }
+            await self?.showSnippets(map, generation: gen)
+        }
+    }
+
+    /// The copy `show` selects: the one filed under `projectDir`, else the most recently active, ties
+    /// broken by path (two copies here are byte-identical), so it is the same one every time.
+    static func pick(_ copies: [Session], projectDir: String?) -> Session? {
+        copies.first { $0.projectDir == projectDir } ?? copies.max { ($0.modified, $0.key) < ($1.modified, $1.key) }
     }
 
     var statusLine: String {
@@ -79,8 +143,30 @@ final class AppModel: ObservableObject {
 
     // MARK: Indexing
 
+    /// The usage figures this window shows: refreshed with the index, and the list re-sorted when they
+    /// change while it is sorted by cost or context.
+    func attach(_ usage: UsageModel) {
+        guard self.usage !== usage else { return }
+        self.usage = usage
+        // `updated` is set once per read, after both maps; its publisher sends at once, then on each read
+        // (as it is about to be stored, when bySession and byFile already hold the new figures).
+        usageWatch = usage.$updated.sink { [weak self, weak usage] _ in
+            guard let usage else { return }
+            self?.setUsage(usage.bySession, byFile: usage.byFile)
+        }
+    }
+
+    func setUsage(_ byID: [String: SessionUsage], byFile: [String: SessionUsage] = [:]) {
+        let new = UsageRank.ranks(byID: byID, byFile: byFile)
+        guard new != ranks else { return }
+        ranks = new
+        if sort.usesFigures { runSearch(after: 0) }
+    }
+
     /// Re-reads changed transcripts and rebuilds the index if anything changed. Cheap when nothing did.
+    /// The usage figures are read again too.
     func refresh() {
+        usage?.refresh()
         if indexing { refreshQueued = true; return }
         indexing = true
         let store = store
@@ -102,6 +188,10 @@ final class AppModel: ObservableObject {
             indexNote = String(format: "indexed in %.1f s", seconds)
             runSearch(after: 0)
         }
+        if let p = pendingShow, index != nil {
+            pendingShow = nil
+            show(sessionID: p.sessionID, projectDir: p.projectDir)
+        }
         if refreshQueued {
             refreshQueued = false
             refresh()
@@ -117,12 +207,13 @@ final class AppModel: ObservableObject {
         let query = ParsedQuery(raw)
         let scope = scope
         let sort = sort
+        let ranks = ranks
         generation += 1
         let gen = generation
         searchTask = Task.detached(priority: .userInitiated) { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled,
-                  let out = index.search(query, scope: scope, sort: sort, cancelled: { Task.isCancelled }),
+                  let out = index.search(query, scope: scope, sort: sort, ranks: ranks, cancelled: { Task.isCancelled }),
                   !Task.isCancelled else { return }
             await self?.show(out, generation: gen, query: raw)
 
@@ -133,11 +224,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func show(_ out: SearchOutcome, generation gen: Int, query raw: String) {
+    /// Puts a search's results on screen. `select` is `show(sessionID:projectDir:)`'s session, selected
+    /// in the same turn as its rows arrive, so no Return or keystroke can fall in between.
+    private func show(_ out: SearchOutcome, generation gen: Int, query raw: String, select key: String? = nil) {
         guard gen == generation else { return }
         outcome = out
         hits = out.hits
         shown = (gen, raw)
+        if let key, hits.contains(where: { $0.id == key }) {
+            resumeFirstHit = false
+            if selection == key { loadExcerpts() } else { selection = key }
+            return
+        }
         if resumeFirstHit {
             resumeFirstHit = false
             if let first = hits.first { resume(first.session) }
@@ -163,22 +261,22 @@ final class AppModel: ObservableObject {
     private func loadExcerpts() {
         excerptTask?.cancel()
         guard let s = selectedSession else {
-            excerpts = []; excerptTotal = 0; excerptSessionID = nil
+            excerpts = []; excerptTotal = 0; excerptKey = nil
             return
         }
         let out = outcome
         excerptTask = Task.detached(priority: .userInitiated) { [weak self] in
             let (items, total) = Snippets.list(s, out, limit: 300)
             guard !Task.isCancelled else { return }
-            await self?.showExcerpts(items, total: total, for: s.id)
+            await self?.showExcerpts(items, total: total, for: s.key)
         }
     }
 
-    private func showExcerpts(_ items: [Excerpt], total: Int, for id: String) {
-        guard id == selection else { return }
+    private func showExcerpts(_ items: [Excerpt], total: Int, for key: String) {
+        guard key == selection else { return }
         excerpts = items
         excerptTotal = total
-        excerptSessionID = id
+        excerptKey = key
     }
 
     func moveSelection(_ delta: Int) {
