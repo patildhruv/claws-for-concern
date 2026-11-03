@@ -18,8 +18,8 @@
 | `Sources/App/Summarizer.swift` | One-line recaps via `claude -p --model haiku` (clean env, timeouts), text cleanup and fallback; `AppLog` |
 | `Sources/App/Overlay.swift` | `Placement`/`Placements` (per-display spot), `StripGeometry` (pure layout and snapping), `OverlayController` (the strip: follow-the-pointer, drag, animated relayout, overflow, hover/click/menus), `StripPanel`, `StripItem`, `ClawdCell` (sprite, badge, VoiceOver), `OverflowChip`, `BlockItem` |
 | `Sources/App/Bubble.swift` | The thought bubble panel and view: text measuring, tail, drawing (fill and stroke from `Brand`) |
-| `Sources/App/StatusMenu.swift` | Menu bar crab: count, the sessions, Jump, Dismiss All, Search Sessions, Pause, Preview, Settings, Quit |
-| `Sources/App/SearchHelper.swift` | Opens the search helper with a nonce; answers its resume requests (who may ask, stale requests, switch to a running session, else a new Ghostty tab in the folder its transcript names) and replies; `ResumeGate` (one tab per session, 15 s cooldown); `Quarantine` (the helper's download mark, cleared at launch) and the alert when the helper will not open |
+| `Sources/App/StatusMenu.swift` | Menu bar crab: count, the sessions, Jump, Dismiss All, Search Sessions, Usage, Pause, Preview, Settings, Quit |
+| `Sources/App/SearchHelper.swift` | Opens the search helper with a nonce, on Search or only Usage (`openUsage`: `--window usage`, or `search.openWindow` to one already running); answers its resume requests (who may ask, stale requests, switch to a running session, else a new Ghostty tab in the folder its transcript names) and replies; `ResumeGate` (one tab per session, 15 s cooldown); `Quarantine` (the helper's download mark, cleared at launch) and the alert when the helper will not open |
 | `Sources/App/SettingsWindow.swift` | The Settings window (toolbar tabs of SwiftUI panes), live status, sprite and bubble previews, corner picker, shortcut recorder |
 | `Sources/App/Notifier.swift` | Optional macOS notifications: post, withdraw on seen, click to open |
 | `Sources/App/Settings.swift` | Every preference key with its default, read accessors, reset |
@@ -32,9 +32,9 @@
 | `Sources/App/Snapshot.swift` | `--snapshot`: renders the README images offscreen |
 | `Sources/Search/ResumeRequest.swift` | Compiled into the app and the helper: `ResumeRequest`/`ResumeReply` (the distributed notifications, nonce, validation), `ResumeCommand` (the app's template), `ProjectDirs` (Claude Code's folder names with its hash, the folder read back from a transcript), their shared tests |
 | `Sources/Search/Brand.swift` | Compiled into the app and the helper: `PixelCrab` (our own crab: menu bar, stand-in sprite, Search's empty states), `Brand` (clay and ink, text and fill shades that meet WCAG AA, the thought-bubble fill and stroke) |
-| `Sources/Search/Demo.swift` | `--demo`: 12 made-up sessions written to a temporary home that `Paths.home` points at; nothing of yours is read, nothing is resumed |
+| `Sources/Search/Demo.swift` | `--demo`: 12 made-up sessions written to a temporary home that `Paths.home` points at; nothing of yours is read, nothing is resumed; `end(of:now:)` puts their work in daytime hours whenever it runs |
 | `Sources/Search/ResumeClient.swift` | The helper's side of a resume: `PendingResumes` (replies and timeouts, pure), `ResumeClient` (sends with the launch nonce, clipboard fallback, `settle` before quitting) |
-| `Sources/Search/App.swift` | The helper's `@main`: the window ("Search Sessions") and its menus, About box, quit on close; CLI `--search`, `--resume`, `--usage`, `--usage-dump` (UsageCLI.swift), `--demo`; `--snapshot` (offscreen, as the key window) |
+| `Sources/Search/App.swift` | The helper's `@main`: the two windows (Search Sessions and Usage, the asked-for one first) and the menus (the Session menu follows the Usage row while it is in front), About box, quit on close; CLI `--search`, `--resume`, `--usage`, `--usage-dump` (UsageCLI.swift), `--demo`, `--currency-status`, `--fetch-rates`; `--snapshot`, `--snapshot-usage` (offscreen, as the key window) |
 | `Sources/Search/Model.swift` | `Scope`, `Message`, `Session` (name, folder, resume command, `canResume`/`whyNotResumable`), `ProjectDirs.resolve` (disk decode), `Paths` (privacy-protected folders, symlinks read with lstat), `Shell.quote` |
 | `Sources/Search/Loader.swift` | `SessionStore`: finds transcripts, re-parses only changed files, in parallel; lenient `Record`/`Content`/`Block` decoding, `FlatStrings` for tool inputs, `SessionBuilder` (name and folder rules), `Prompts` (first-prompt naming) |
 | `Sources/Search/Tokenizer.swift` | UTF-8 word tokenizer for the index and highlighting |
@@ -51,8 +51,17 @@
 | `Sources/Search/DemoUsage.swift` | `--demo`'s usage figures: a spec per made-up session played through `UsageBuilder` |
 | `Sources/Search/UsageCLI.swift` | `--usage <id prefix>` (readable) and `--usage-dump` (JSON for the cross-check) |
 | `Sources/Search/UsageTests.swift` | The reader's self-test on made-up transcripts, the tables, the cache, the demo figures; invariants and timings on your own transcripts |
+| `Sources/Search/UsageWindow.swift` | The Usage window (guide: docs/usage-window.md): toolbar filters, layout, status line; `HelperWindow` (which window opens at launch: `--window usage`), `WindowRequest` (Claws asks a running helper for a window), `CurrencyMenu`, `UsageBreakdown` |
+| `Sources/Search/UsageSections.swift` | Its sections: tiles, cost per day (Swift Charts, stacked, hover), near the context limit, all sessions (sortable `Table`, row actions), by project, by model, when Claude works; `UsageStyle` (colours that meet AA), row formatting |
+| `Sources/Search/UsageWindowModel.swift` | The window's state: filters, report, sort and selection, running sessions, Open in Search / Resume / Copy ID / Export CSV; `UsagePick` (the Session menu acts on the Usage row while it is in front) |
+| `Sources/Search/UsageReport.swift` | Pure: `UsageRange`, rows per session ID for the range, totals, chart series (stacked, colours by the range's costliest projects), by project and model, heatmap; `UsageCSV` |
+| `Sources/Search/Currency.swift` | The opt-in second currency: `Currencies`, `CurrencyFormat` (Indian short scale), `Frankfurter` (one request, fixed headers), `RateRule` (once a day), `SecondCurrencySetting` (what `UsageModel.second` follows), `RateCLI` |
+| `Sources/Search/LiveSessions.swift` | Claws' session files, read only: which sessions are running (Claws' own rule); the demo's made-up files |
+| `Sources/Search/AppModel+Usage.swift` | What the Usage window needs from Search's model: every indexed session |
+| `Sources/Search/UsageSnapshot.swift` | `--snapshot-usage`: the Usage window offscreen, or its last row (`--part breakdown`) |
+| `Sources/Search/UsageWindowTests.swift` | The window's self-test: ranges, totals, CSV, formats, the rate rule and cache (no network), live files, launch window and requests, Open in Search |
 | `Sources/Search/Info.plist` | The helper's bundle (build.sh adds the app's version) |
 | `tools/make-icon.swift` | Draws `Resources/AppIcon.icns`, and `SearchIcon.icns` for the helper with `search` |
 | `tools/usage-crosscheck.py` | An independent Python reading of every transcript, compared field by field with `--usage-dump`; estimates against Claude Code's own figures (output never committed) |
-| `tools/make-readme-media.sh` | Renders `docs/media/*` (hero shots, bubble close-ups, demo GIF, Search on demo data) |
+| `tools/make-readme-media.sh` | Renders `docs/media/*` (hero shots, bubble close-ups, demo GIF, Search and Usage on demo data) |
 | `build.sh` | Compiles the app, the hook and the search helper, bundles, signs inside out, installs |

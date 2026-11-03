@@ -13,7 +13,18 @@ enum Main {
         if args.contains("--resume") { done(CLI.resume(args)) }
         if args.contains("--usage-dump") { done(UsageCLI.dump()) }
         if args.contains("--usage") { done(UsageCLI.show(args)) }
+        if args.contains("--currency-status") { done(MainActor.assumeIsolated { RateCLI.status() }) }
+        if args.contains("--fetch-rates") { done(MainActor.assumeIsolated { RateCLI.fetch() }) }
+        if args.contains("--snapshot-usage") { done(MainActor.assumeIsolated { UsageSnapshot.run(args) }) }
         if args.contains("--snapshot") { done(MainActor.assumeIsolated { Snapshot.run(args) }) }
+        // The crab menu's Usage… opens only the Usage window (`--window usage`).
+        HelperWindow.first = HelperWindow.atLaunch(args)
+        MainActor.assumeIsolated {
+            // The second currency: your setting, and Frankfurter at most once a day while it is on. The demo
+            // has made-up rates and never asks the network.
+            if Demo.active { SecondCurrencySetting.shared.useDemo(code: CLI.value(args, "--currency")) }
+            else { SecondCurrencySetting.shared.useDefaults(UserDefaults.standard, fetcher: Frankfurter.fetch) }
+        }
         ClawsSearchApp.main()
     }
 }
@@ -26,25 +37,28 @@ struct ClawsSearchApp: App {
     @StateObject private var usage = UsageModel()
 
     var body: some Scene {
-        // The app is "Claws Search" (Dock, menus, ⌘-Tab); its window says what it does, like the crab menu.
-        Window("Search Sessions", id: "main") {
-            ContentView()
-                .environmentObject(model)
-                .environmentObject(usage)
-                .frame(minWidth: 820, minHeight: 480)
-        }
-        .defaultSize(width: 1180, height: 760)
-        .commands { SessionCommands(model: model) }
+        // SwiftUI opens the first scene at launch, and macOS 14 cannot hold one back: the window asked
+        // for is declared first, so Usage… from the crab menu brings up only Usage.
+        let order = HelperWindow.order(first: HelperWindow.first)
+        window(order[0]).commands { SessionCommands(model: model) }
+        window(order[1])
+    }
 
-        // Every session's usage. Opened from the crab menu (Usage…) and from Search's toolbar; the same
-        // process, so the figures are read once.
-        Window("Usage", id: "usage") {
-            UsageWindow()
-                .environmentObject(model)
-                .environmentObject(usage)
-                .frame(minWidth: 900, minHeight: 560)
+    /// The app is "Claws Search" (Dock, menus, ⌘-Tab); each window says what it does, like the crab menu.
+    /// Usage is every session's usage, in the same process, so the figures are read once.
+    private func window(_ w: HelperWindow) -> some Scene {
+        Window(w.title, id: w.rawValue) {
+            Group {
+                switch w {
+                case .search: ContentView().frame(minWidth: 820, minHeight: 480)
+                case .usage: UsageWindow().frame(minWidth: 900, minHeight: 560)
+                }
+            }
+            .environmentObject(model)
+            .environmentObject(usage)
+            .opensRequestedWindows()
         }
-        .defaultSize(width: 1280, height: 860)
+        .defaultSize(w.defaultSize)
     }
 }
 
@@ -74,6 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct SessionCommands: Commands {
     @ObservedObject var model: AppModel
+    /// The Usage window's row, while that window is in front.
+    @FocusedValue(\.usagePick) private var usagePick
 
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
@@ -88,7 +104,7 @@ struct SessionCommands: Commands {
                 .keyboardShortcut("f")
         }
         CommandMenu("Session") {
-            let s = model.selectedSession
+            let s = usagePick.map(\.session) ?? model.selectedSession
             Button("Resume") { if let s { model.resume(s) } }
                 .keyboardShortcut("o")
                 .disabled(s?.canResume != true)
@@ -145,7 +161,7 @@ enum AboutBox {
 }
 
 enum CLI {
-    private static func value(_ args: [String], _ flag: String) -> String? {
+    static func value(_ args: [String], _ flag: String) -> String? {
         guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
         return args[i + 1]
     }

@@ -19,5 +19,11 @@ sips -Z 256 Resources/AppIcon-1024.png --out $OUT/icon.png >/dev/null
 # Search, on made-up sessions only: --demo never reads your ~/.claude (its self-test checks the paths).
 SEARCH="build/Claws for Concern.app/Contents/Helpers/Claws Search.app/Contents/MacOS/ClawsSearch"
 for v in light dark; do "$SEARCH" --demo --snapshot "$OUT/search-$v.png" --query '"rate limit"' --appearance $v >/dev/null; done
+# Usage, on the same made-up sessions (their work sits in daytime hours whenever this runs): the window a
+# little under its default size, then its last row (by project, by model, when Claude works).
+for v in light dark; do
+  "$SEARCH" --demo --snapshot-usage "$OUT/usage-$v.png" --size 1280x800 --select first --appearance $v >/dev/null
+  "$SEARCH" --demo --snapshot-usage "$OUT/usage-more-$v.png" --size 1280x400 --part breakdown --appearance $v >/dev/null
+done
 rm -rf "$TMP"
 ls -la $OUT

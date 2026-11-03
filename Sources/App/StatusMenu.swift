@@ -76,7 +76,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             menu.addItem(BlockItem("Dismiss All") { [weak self] in self?.tracker.acknowledgeAll() })
         }
         menu.addItem(.separator())
-        menu.addItem(BlockItem("Search Sessions…", key: "f") { SearchHelper.open() })
+        Self.helperItems().forEach(menu.addItem)
 
         if Settings.pausedUntil == nil {
             let pause = NSMenu()
@@ -97,6 +97,12 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         menu.addItem(BlockItem("Settings…", key: ",") { AppDelegate.shared?.openSettings() })
         menu.addItem(BlockItem("About Claws for Concern") { AppDelegate.shared?.openSettings(tab: "about") })
         menu.addItem(BlockItem("Quit Claws for Concern", key: "q") { NSApp.terminate(nil) })
+    }
+
+    /// The search helper's two windows: Search, and every session's usage right under it.
+    static func helperItems() -> [NSMenuItem] {
+        [BlockItem("Search Sessions…", key: "f") { SearchHelper.open() },
+         BlockItem("Usage…", key: "u") { SearchHelper.openUsage() }]
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
