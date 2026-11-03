@@ -94,4 +94,16 @@ enum UsageFormat {
 
     /// "84%".
     static func percent(_ fraction: Double) -> String { "\(Int((fraction * 100).rounded()))%" }
+
+    /// "Opus 5.5", "Sonnet 4.5", "Sonnet 3.7", "Haiku 4.5 (1M)"; the ID itself for anything else.
+    static func model(_ id: String) -> String {
+        guard let key = Pricing.key(for: id) else { return id }
+        let parts = key.dropFirst("claude-".count).split(separator: "-").map(String.init)
+        let families = ["opus", "sonnet", "haiku", "fable", "mythos"]
+        guard let family = parts.first(where: families.contains),
+              case let numbers = parts.filter({ Int($0) != nil }), !numbers.isEmpty,
+              parts.allSatisfy({ $0 == family || Int($0) != nil }) else { return id }
+        let long = id.lowercased().contains("[1m]") ? " (1M)" : ""
+        return family.prefix(1).uppercased() + family.dropFirst() + " " + numbers.joined(separator: ".") + long
+    }
 }
