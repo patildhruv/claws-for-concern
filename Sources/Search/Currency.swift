@@ -48,57 +48,86 @@ enum CurrencyFormat {
     /// way, like the dollars beside it ("€11.42", "¥1,903", "CA$1,284").
     static func amount(_ v: Double, code: String) -> String {
         let info = Currencies.info(code) ?? Currencies.Info(code: code, name: code, symbol: code)
-        if code == "INR" { return info.symbol + indian(v) }
+        // The sign first: "-₹3.00", "-€3.00".
+        let sign = round(v, 2) < 0 ? "-" : ""
+        if code == "INR" { return sign + info.symbol + indian(v) }
+        // Rounded before the unit is chosen: 999.995 is "€1,000", not "€1,000.00".
+        let a = abs(v)
+        let digits = round(a, info.decimals) >= 1000 ? 0 : info.decimals
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.locale = Locale(identifier: "en_US")
-        let digits = abs(v) >= 1000 ? 0 : info.decimals
         f.minimumFractionDigits = digits
         f.maximumFractionDigits = digits
-        let number = f.string(from: NSNumber(value: abs(v))) ?? String(format: "%.\(digits)f", abs(v))
+        let r = round(a, digits)
+        let number = f.string(from: NSNumber(value: r)) ?? String(format: "%.\(digits)f", r)
         // A symbol made of letters gets a space ("CHF 12.40"); "€12.40", "CA$12.40" do not.
         let gap = info.symbol.last?.isLetter == true ? " " : ""
-        return (v < 0 ? "-" : "") + info.symbol + gap + number
+        return sign + info.symbol + gap + number
     }
 
-    /// "37.80", "845", "9.12K", "91.2K", "8.26L", "82.6L", "1.2Cr", "1,240Cr": three significant digits
-    /// from a thousand up, trailing zeros dropped.
+    /// `x` rounded to `places` decimals as it is written in decimal, half away from zero: 99.995 is 100
+    /// (its binary value is just under, and plain rounding gives 99.99).
+    static func round(_ x: Double, _ places: Int) -> Double {
+        guard x.isFinite else { return x }
+        var d = Decimal(string: "\(x)", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(x)
+        var r = Decimal()
+        NSDecimalRound(&r, &d, places, .plain)
+        return NSDecimalNumber(decimal: r).doubleValue
+    }
+
+    /// The amount without sign: "37.80", "845", "9.12K", "91.2K", "8.26L", "82.6L", "1.2Cr", "1,240Cr".
+    /// Three significant digits from a thousand up, trailing zeros dropped. Each step is rounded before
+    /// the unit is chosen, so 99,950 is "1L" (not "100K"), 999.5 "1K", 99.995 "100".
     static func indian(_ v: Double) -> String {
-        let a = abs(v), sign = v < 0 ? "-" : ""
-        func short(_ x: Double) -> String {
-            var s = String(format: "%.\(x < 10 ? 2 : x < 100 ? 1 : 0)f", x)
+        let a = abs(v)
+        func trimmed(_ x: Double, _ digits: Int) -> String {
+            var s = String(format: "%.\(digits)f", x)
             if s.contains(".") {
                 while s.hasSuffix("0") { s.removeLast() }
                 if s.hasSuffix(".") { s.removeLast() }
             }
             return s
         }
-        if a < 100 { return sign + String(format: "%.2f", a) }
-        if a < 1_000 { return sign + String(format: "%.0f", a) }
-        if a < 100_000 { return sign + short(a / 1_000) + "K" }
-        if a < 10_000_000 { return sign + short(a / 100_000) + "L" }
-        let crore = a / 10_000_000
-        if crore < 1_000 { return sign + short(crore) + "Cr" }
+        /// Three significant digits (for x ≥ 1, or just under once rounded up).
+        func three(_ x: Double) -> (value: Double, digits: Int) {
+            let d = x < 10 ? 2 : x < 100 ? 1 : 0
+            return (round(x, d), d)
+        }
+        let paise = round(a, 2)
+        if paise < 100 { return String(format: "%.2f", paise) }
+        let whole = round(a, 0)
+        if whole < 1_000 { return String(format: "%.0f", whole) }
+        for (divisor, unit) in [(1e3, "K"), (1e5, "L")] {
+            let s = three(a / divisor)
+            if s.value < 100 { return trimmed(s.value, s.digits) + unit }
+        }
+        let crore = three(a / 1e7)
+        if crore.value < 1_000 { return trimmed(crore.value, crore.digits) + "Cr" }
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.locale = Locale(identifier: "en_IN")
         f.maximumFractionDigits = 0
-        return sign + (f.string(from: NSNumber(value: crore.rounded())) ?? String(format: "%.0f", crore)) + "Cr"
+        let n = round(a / 1e7, 0)
+        return (f.string(from: NSNumber(value: n)) ?? String(format: "%.0f", n)) + "Cr"
     }
 
-    /// "₹ at 94.12 (3 Nov)": the symbol, the rate for one dollar and the day it is for.
-    static func rateLine(code: String, perUSD: Double, date: Date, calendar: Calendar = .current) -> String {
+    /// "₹ at 94.12 (3 Nov)": the symbol, the rate for one dollar and the day it is for. The day is a
+    /// calendar date from the service: written in the Gregorian calendar and UTC, whatever yours are
+    /// (the Japanese and Buddhist calendars wrote 2026 as other years, and a zone west of UTC the day before).
+    static func rateLine(code: String, perUSD: Double, date: Date, now: Date = Date()) -> String {
         let symbol = Currencies.info(code)?.symbol ?? code
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.locale = Locale(identifier: "en_US")
         f.minimumFractionDigits = perUSD < 1 ? 4 : 2
         f.maximumFractionDigits = perUSD < 1 ? 4 : 2
+        let utc = RateRule.utc
         let d = DateFormatter()
-        d.calendar = calendar
-        d.timeZone = calendar.timeZone
+        d.calendar = utc
+        d.timeZone = utc.timeZone
         d.locale = Locale(identifier: "en_GB")
-        d.setLocalizedDateFormatFromTemplate(calendar.isDate(date, equalTo: Date(), toGranularity: .year) ? "d MMM" : "d MMM yyyy")
+        d.setLocalizedDateFormatFromTemplate(utc.isDate(date, equalTo: now, toGranularity: .year) ? "d MMM" : "d MMM yyyy")
         return "\(symbol) at \(f.string(from: NSNumber(value: perUSD)) ?? String(perUSD)) (\(d.string(from: date)))"
     }
 }
@@ -122,17 +151,37 @@ struct RateTable: Codable, Equatable {
 enum RateRule {
     static let retryAfter: TimeInterval = 3600
 
+    /// `calendar` decides what "the same day" is for you (`Calendar.usage`). Rates fetched "in the
+    /// future" (a clock that was ahead) are stale, as is an attempt "in the future".
     static func shouldFetch(table: RateTable?, lastAttempt: Date?, now: Date, calendar: Calendar) -> Bool {
-        if let t = table, calendar.isDate(t.fetched, inSameDayAs: now) || t.fetched > now { return false }
-        if let a = lastAttempt, now.timeIntervalSince(a) < retryAfter, a <= now { return false }
+        if let t = table, t.fetched <= now, calendar.isDate(t.fetched, inSameDayAs: now) { return false }
+        if let a = lastAttempt, a <= now, now.timeIntervalSince(a) < retryAfter { return false }
         return true
     }
 
-    /// "2026-11-02" as a calendar day (its start, in `calendar`'s time zone).
-    static func day(_ text: String, calendar: Calendar) -> Date? {
+    /// The service's days are Gregorian calendar dates; kept as UTC midnight and written in UTC.
+    static var utc: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }
+
+    /// "2026-11-02" as that day (UTC midnight, Gregorian). nil for anything that is not a real date.
+    static func day(_ text: String) -> Date? {
+        guard text.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil else { return nil }
         let parts = text.split(separator: "-").compactMap { Int($0) }
-        guard parts.count == 3 else { return nil }
-        return calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+        guard parts.count == 3, (1900...2999).contains(parts[0]) else { return nil }
+        let cal = utc
+        guard let d = cal.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) else { return nil }
+        // No rolling over: 2026-02-30 is not 2 March.
+        let back = cal.dateComponents([.year, .month, .day], from: d)
+        return back.year == parts[0] && back.month == parts[1] && back.day == parts[2] ? d : nil
+    }
+
+    /// The day back as "2026-11-02".
+    static func text(_ day: Date) -> String {
+        let c = utc.dateComponents([.year, .month, .day], from: day)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 }
 
@@ -152,13 +201,18 @@ enum Frankfurter {
         return c.url!
     }
 
-    /// `[{"date":"2026-11-02","base":"USD","quote":"INR","rate":94.94}, …]`. nil when nothing usable came back.
-    static func parse(_ data: Data, codes: Set<String>) -> [String: RateTable.Rate]? {
+    /// A rate we believe: finite, and between 0.0001 and 1,000,000 units of the currency per dollar.
+    static let plausible: ClosedRange<Double> = 1e-4...1e6
+
+    /// `[{"date":"2026-11-02","base":"USD","quote":"INR","rate":94.94}, …]`. Rows for another base, a
+    /// currency not asked for, an implausible rate, or a day that is not a real date or is more than a
+    /// day ahead of `now` are dropped. nil when nothing usable came back.
+    static func parse(_ data: Data, codes: Set<String>, now: Date = Date()) -> [String: RateTable.Rate]? {
         struct Row: Decodable { let date: String; let base: String; let quote: String; let rate: Double }
         guard let rows = try? JSONDecoder().decode([Row].self, from: data) else { return nil }
         var out: [String: RateTable.Rate] = [:]
-        for r in rows where r.base == "USD" && codes.contains(r.quote) && r.rate.isFinite && r.rate > 0
-            && r.date.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil {
+        for r in rows where r.base == "USD" && codes.contains(r.quote) && r.rate.isFinite && plausible.contains(r.rate) {
+            guard let day = RateRule.day(r.date), day <= now.addingTimeInterval(86_400) else { continue }
             out[r.quote] = .init(perUSD: r.rate, date: r.date)
         }
         return out.isEmpty ? nil : out
@@ -169,21 +223,56 @@ enum Frankfurter {
     }
 
     /// The request's headers, the same for everyone: URLSession would otherwise send your languages
-    /// (Accept-Language) and a user agent naming this Mac's macOS and CFNetwork versions. It adds Host,
-    /// Accept-Encoding and Connection itself (checked against a local listener, 2026-11-03).
+    /// (Accept-Language) and a user agent naming this Mac's macOS and CFNetwork versions. macOS adds
+    /// Host, Accept-Encoding (gzip, deflate) and Connection (keep-alive) itself (checked against a local
+    /// listener, 2026-11-03).
     static let headers = ["User-Agent": "ClawsSearch", "Accept": "application/json", "Accept-Language": "en"]
+    /// The answer is about 1 KB; anything over this is not a rate table, and reading stops.
+    static let maxBytes = 64 * 1024
 
-    /// One GET, no cookies, no cache on disk, fixed headers.
-    @Sendable static func fetch(_ codes: [String]) async throws -> [String: RateTable.Rate] {
+    /// No cookies, no cache on disk, fixed headers, 15 s without data or 20 s in all.
+    static func configuration() -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 20
         config.httpAdditionalHeaders = headers
-        let session = URLSession(configuration: config)
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+        return config
+    }
+
+    /// Refuses every redirect, so the one request goes to `host` and nowhere else; a redirect's own
+    /// answer (3xx) then fails the request.
+    final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest) async -> URLRequest? { nil }
+    }
+
+    /// Reads at most `limit` bytes; more fails.
+    static func collect<S: AsyncSequence>(_ bytes: S, limit: Int = maxBytes) async throws -> Data where S.Element == UInt8 {
+        var data = Data()
+        for try await b in bytes {
+            data.append(b)
+            if data.count > limit { throw Failure(description: "the answer is over \(limit / 1024) KB") }
+        }
+        return data
+    }
+
+    /// One GET to Frankfurter.
+    @Sendable static func fetch(_ codes: [String]) async throws -> [String: RateTable.Rate] {
+        try await fetch(codes, from: url(codes: codes))
+    }
+
+    /// One GET to `url` (Frankfurter's, or a local listener in a test harness).
+    static func fetch(_ codes: [String], from url: URL) async throws -> [String: RateTable.Rate] {
+        let session = URLSession(configuration: configuration())
         defer { session.finishTasksAndInvalidate() }
-        let (data, response) = try await session.data(from: url(codes: codes))
+        let (bytes, response) = try await session.bytes(from: url, delegate: NoRedirects())
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw Failure(description: "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
         }
+        if http.expectedContentLength > Int64(maxBytes) { throw Failure(description: "the answer is over \(maxBytes / 1024) KB") }
+        let data = try await collect(bytes)
         guard let rates = parse(data, codes: Set(codes)) else { throw Failure(description: "no rates in the answer") }
         return rates
     }
@@ -237,7 +326,8 @@ final class SecondCurrencySetting: ObservableObject {
     private(set) var fetcher: Fetcher?
     private(set) var store: SettingStore
     var now: () -> Date = Date.init
-    var calendar = Calendar.current
+    /// Your days, for "once a day": Gregorian in your time zone (`Calendar.current` may be another calendar).
+    var calendar = Calendar.usage
     /// How many requests went out: the self-test counts them.
     private(set) var requests = 0
 
@@ -327,7 +417,7 @@ final class SecondCurrencySetting: ObservableObject {
         guard let code else { return "Dollars only. Turn on a second currency to fetch a rate once a day." }
         if isDemo { return "Demo: a made-up rate, nothing fetched." }
         if let a = active {
-            let line = CurrencyFormat.rateLine(code: code, perUSD: a.perUSD, date: a.date, calendar: calendar)
+            let line = CurrencyFormat.rateLine(code: code, perUSD: a.perUSD, date: a.date, now: now())
             return problem == nil ? line : line + ", the last rate fetched (offline)"
         }
         if fetching { return "Fetching today's rate…" }
@@ -344,7 +434,7 @@ final class SecondCurrencySetting: ObservableObject {
 
     private func recompute() {
         let next: UsageModel.SecondCurrency? = code.flatMap { c in
-            guard let r = table?.rates[c], let day = RateRule.day(r.date, calendar: calendar) else { return nil }
+            guard let r = table?.rates[c], let day = RateRule.day(r.date) else { return nil }
             return UsageModel.SecondCurrency(code: c, perUSD: r.perUSD, date: day)
         }
         if next != active { active = next }

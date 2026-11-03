@@ -120,18 +120,22 @@ struct UsageBar: View {
 // MARK: Formatting a row
 
 extension UsageRow {
-    /// "$12.40 est.", "≥ $3.10 est." when part could not be priced, "unknown" when none of it could. The
-    /// table writes the second currency (`UsageModel.secondMoney`) on a line of its own under it.
+    /// "$12.40", "$12.40 est.", "≥ $3.10 est." when part could not be priced, "Unknown" when none of it
+    /// could. The table writes the second currency (`UsageModel.secondMoney`) on a line under it.
     var dollarsText: String {
-        guard let c = cost else { return "unknown" }
-        return (costPartial ? "≥ " : "") + UsageFormat.usd(c) + (costEstimate ? " est." : "")
+        UsageCost.text(cost, atLeast: costPartial, money: UsageFormat.usd) + (cost != nil && costEstimate ? " est." : "")
     }
 
     var costHelp: String {
         guard cost != nil else { return "No price for \(unpriced.joined(separator: ", ")): the cost is unknown, not zero." }
-        var s = costEstimate ? "Estimated here from the session's tokens, at API prices." : "Claude Code's own figure, at API prices."
-        if costPartial { s += " Part could not be priced (\(unpriced.joined(separator: ", "))): the cost is at least this." }
-        return s
+        switch costKind {
+        case .claudeCode: return "Claude Code's own figure, at API prices."
+        case .claudeCodeSplit: return "Claude Code's figure for the whole session, split by day for this range (est.), at API prices."
+        case .estimate:
+            var s = "Estimated here from the session's tokens, at API prices."
+            if costPartial { s += " Part could not be priced (\(unpriced.joined(separator: ", "))): the cost is at least this." }
+            return s
+        }
     }
 
     /// "85%", or tokens when the model's window is not known.
@@ -179,9 +183,10 @@ struct UsageTiles: View {
     var body: some View {
         let t = vm.report.totals
         VStack(alignment: .leading, spacing: 10) {
-            SectionTitle(title: heading)
+            SectionTitle(title: Self.heading(vm.filter))
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 172), spacing: 12, alignment: .top)], alignment: .leading, spacing: 12) {
-                UsageTile(label: "Cost at API prices", value: UsageFormat.usd(t.cost), tag: t.costEstimate ? "est." : nil, sub: costSub(t))
+                UsageTile(label: "Cost at API prices", value: Self.costValue(t, money: UsageFormat.usd),
+                          tag: t.costEstimate && !t.costUnknown ? "est." : nil, sub: costSub(t))
                 UsageTile(label: "Written by Claude", value: UsageFormat.tokens(t.written), sub: "output tokens")
                 UsageTile(label: "Claude worked", value: UsageFormat.duration(t.workSeconds),
                           sub: "on \(t.workDays) day\(t.workDays == 1 ? "" : "s")")
@@ -202,17 +207,28 @@ struct UsageTiles: View {
         }
     }
 
-    private var heading: String {
-        switch vm.filter.range {
-        case .today: return "Totals for today"
-        case .week: return "Totals for the last 7 days"
-        case .month: return "Totals for the last 30 days"
-        case .all: return "Totals for all time"
+    /// "Totals for the last 30 days", and with a model filter, what the figures then are: whole sessions.
+    nonisolated static func heading(_ f: UsageFilter) -> String {
+        let span: String
+        switch f.range {
+        case .today: span = "Totals for today"
+        case .week: span = "Totals for the last 7 days"
+        case .month: span = "Totals for the last 30 days"
+        case .all: span = "Totals for all time"
         }
+        guard let m = f.model else { return span }
+        return "\(span): sessions where \(m) replied, all their models counted"
+    }
+
+    /// "Unknown" when nothing could be priced, "≥ $12.40" when part could not, else "$12.40".
+    nonisolated static func costValue(_ t: UsageTotals, money: (Double) -> String) -> String {
+        UsageCost.text(t.costUnknown ? nil : t.cost, atLeast: t.costAtLeast, money: money)
     }
 
     private func costSub(_ t: UsageTotals) -> String {
-        if let second = usage.secondMoney(t.cost), let rate = usage.rateLine { return "\(second) · \(rate)" }
+        if t.costUnknown { return "no API price for these models" }
+        if let second = usage.secondMoney(t.cost), let rate = usage.rateLine { return "\(t.costAtLeast ? "≥ " : "")\(second) · \(rate)" }
+        if t.costAtLeast { return "what could be priced" }
         return t.costEstimate ? "includes estimates" : "Claude Code's own figures"
     }
 
@@ -280,7 +296,7 @@ struct CostPerDaySection: View {
 
     private func legend(_ r: UsageReport) -> some View {
         HStack(spacing: 14) {
-            ForEach(r.series, id: \.name) { s in
+            ForEach(r.series, id: \.key) { s in
                 HStack(spacing: 5) {
                     RoundedRectangle(cornerRadius: 2).fill(UsageStyle.color(slot: s.slot)).frame(width: 10, height: 10)
                     Text(s.name).font(.caption).lineLimit(1)
@@ -306,8 +322,9 @@ struct CostPerDaySection: View {
             ForEach(r.days) { day in
                 BarMark(x: .value("Day", day.day, unit: .day), yStart: .value("Cost", day.start), yEnd: .value("Cost", day.start + day.cost),
                         width: .ratio(ratio))
+                    // Keyed by project key: two projects may share a folder name, never a key.
                     .foregroundStyle(by: .value("Project", day.series))
-                    .accessibilityLabel("\(day.series), \(Self.dayText(day.day))")
+                    .accessibilityLabel("\(r.seriesName(day.series)), \(Self.dayText(day.day))")
                     .accessibilityValue(UsageFormat.usd(day.cost) + " at API prices")
             }
             // A 2 pt gap of the card's colour where two parts of a day meet, so neighbours never touch.
@@ -328,7 +345,7 @@ struct CostPerDaySection: View {
                     }
             }
         }
-        .chartForegroundStyleScale(domain: r.series.map(\.name), range: r.series.map { UsageStyle.color(slot: $0.slot) })
+        .chartForegroundStyleScale(domain: r.series.map(\.key), range: r.series.map { UsageStyle.color(slot: $0.slot) })
         .chartLegend(.hidden)
         .chartXScale(domain: d)
         .chartXAxis {
@@ -377,8 +394,8 @@ struct CostPerDaySection: View {
             Text("\(Self.dayText(day)): \(usage.money(total))").font(.caption.weight(.semibold))
             ForEach(parts) { p in
                 HStack(spacing: 5) {
-                    RoundedRectangle(cornerRadius: 2).fill(UsageStyle.color(slot: r.series.first { $0.name == p.series }?.slot)).frame(width: 8, height: 8)
-                    Text("\(p.series) \(UsageFormat.usd(p.cost))").font(.caption)
+                    RoundedRectangle(cornerRadius: 2).fill(UsageStyle.color(slot: r.series.first { $0.key == p.series }?.slot)).frame(width: 8, height: 8)
+                    Text("\(r.seriesName(p.series)) \(UsageFormat.usd(p.cost))").font(.caption)
                 }
             }
         }
@@ -462,6 +479,25 @@ struct NearRow: View {
     }
 }
 
+/// Resume: clay with ink when it can act (5.9:1, as in Search); a plain grey bordered button when it
+/// cannot, since a disabled prominent button keeps most of its clay and looks ready to press.
+struct ResumeButton: View {
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        if enabled {
+            Button(action: action) { Label("Resume", systemImage: "terminal").foregroundStyle(Color.ink) }
+                .buttonStyle(.borderedProminent)
+                .tint(.clay)
+        } else {
+            Button(action: action) { Label("Resume", systemImage: "terminal") }
+                .buttonStyle(.bordered)
+                .disabled(true)
+        }
+    }
+}
+
 /// The row actions, for context menus.
 struct RowActions: View {
     @EnvironmentObject var vm: UsageWindowModel
@@ -516,20 +552,16 @@ struct AllSessionsSection: View {
     }
 
     private var actions: some View {
-        let id = vm.selection
+        // Only a row that is shown and selected (`selectedRow`): a hidden one is never acted on.
+        let id = vm.selectedRow?.id
         let s = vm.selectedSession
+        let canResume = s?.canResume == true
         return HStack(spacing: 8) {
             Button { if let id { open(id) } } label: { Label("Open in Search", systemImage: "magnifyingglass") }
                 .disabled(s == nil)
                 .help(id == nil ? "Select a session first" : "Shows it in the Search window")
-            Button { if let id { vm.resume(id) } } label: {
-                // Ink on clay, as in Search: 5.9:1.
-                Label("Resume", systemImage: "terminal").foregroundStyle(Color.ink)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.clay)
-            .disabled(s?.canResume != true)
-            .help(s?.whyNotResumable ?? (id == nil ? "Select a session first" : "Switches to its tab if it is still open, else resumes it in a new terminal tab"))
+            ResumeButton(enabled: canResume) { if let id { vm.resume(id) } }
+                .help(s?.whyNotResumable ?? (id == nil ? "Select a session first" : "Switches to its tab if it is still open, else resumes it in a new terminal tab"))
             Button { if let id { vm.copyID(id) } } label: { Label("Copy ID", systemImage: "number") }
                 .disabled(id == nil)
             Button { vm.exportCSV(second: usage.second) } label: { Label("Export CSV…", systemImage: "square.and.arrow.up") }
@@ -638,23 +670,29 @@ struct ByProjectSection: View {
                     HStack(spacing: 10) {
                         Text(p.name).lineLimit(1).frame(width: 104, alignment: .leading)
                         UsageBar(fraction: top > 0 ? p.cost / top : 0, color: UsageStyle.color(slot: p.slot)).frame(height: 9)
-                        Text(usage.money(p.cost) + (p.estimate ? " est." : "")).monospacedDigit().lineLimit(1).fixedSize()
+                        Text(Self.costText(p, money: usage.money)).monospacedDigit().lineLimit(1).fixedSize()
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(vm.filter.project == p.key ? "Show every project again" : "Show only \(p.name)")
                 .accessibilityLabel(p.name)
-                .accessibilityValue("\(usage.money(p.cost))\(p.estimate ? " estimated" : ""), \(UsageFormat.percent(p.share)) of the cost, \(p.sessions) sessions")
+                .accessibilityValue("\(Self.costText(p, money: usage.money)), \(UsageFormat.percent(p.share)) of the cost, \(p.sessions) sessions")
             }
             if projects.count > 6 {
                 let rest = projects.dropFirst(6)
-                Text("+\(rest.count) more: \(usage.money(rest.reduce(0) { $0 + $1.cost }))")
+                let atLeast = rest.contains { $0.incomplete }
+                Text("+\(rest.count) more: \(UsageCost.text(rest.reduce(0) { $0 + $1.cost }, atLeast: atLeast, money: usage.money))")
                     .foregroundStyle(UsageStyle.secondaryText)
                     .help(rest.map(\.name).joined(separator: ", "))
             }
         }
         .usageCard()
+    }
+
+    /// "$12.40 est.", "≥ $3.10 est." when some of its sessions could not be priced, "Unknown" when none could.
+    nonisolated static func costText(_ p: UsageReport.ProjectTotal, money: (Double) -> String) -> String {
+        UsageCost.text(p.known ? p.cost : nil, atLeast: p.incomplete, money: money) + (p.known && p.estimate ? " est." : "")
     }
 }
 
@@ -669,6 +707,11 @@ struct ByModelSection: View {
         let small = models.filter { $0.share > 0 && $0.share < 0.01 }.reduce(0) { $0 + $1.share }
         VStack(alignment: .leading, spacing: 10) {
             SectionTitle(title: "By model")
+            if let m = vm.filter.model {
+                // The filter picks whole sessions: the figures here are every model in them, not m's alone.
+                Text(Self.filterNote(m)).font(.caption).foregroundStyle(UsageStyle.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if models.isEmpty {
                 Text("Nothing in this range.").font(.callout).foregroundStyle(UsageStyle.secondaryText)
             } else {
@@ -703,7 +746,7 @@ struct ByModelSection: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help(vm.filter.model == m.name ? "Show every model again" : "Only sessions in which \(m.name) replied")
+                        .help(vm.filter.model == m.name ? "Show every model again" : Self.filterHelp(m.name))
                     }
                     if !rest.isEmpty {
                         Text("+\(rest.count) more: \(usage.money(rest.reduce(0) { $0 + ($1.cost ?? 0) })) est.")
@@ -719,6 +762,10 @@ struct ByModelSection: View {
     }
 
     static let shown = 6
+
+    /// What clicking a model does: it keeps whole sessions, so it never isolates that model's cost.
+    nonisolated static func filterHelp(_ m: String) -> String { "Show only sessions in which \(m) replied, with every model in them counted" }
+    nonisolated static func filterNote(_ m: String) -> String { "Sessions where \(m) replied, all their models counted: not \(m)'s cost alone." }
 
     /// By the model's place in the all-time list, so a filter never repaints the others; under 1% grey.
     private func color(_ name: String) -> Color {

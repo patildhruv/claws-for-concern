@@ -74,17 +74,40 @@ enum SearchHelper {
                 // Already running: it kept its own nonce, and this one never reached it.
                 let known = already?.processIdentifier == pid || nonces.contains { $0.key != nonce && $0.value == pid }
                 nonces[nonce] = known ? nil : pid
-                // It ignored the arguments (macOS only brought it forward): ask for the window. One still
-                // starting up may not listen yet, so it is asked again a moment later (opening is idempotent).
+                // It ignored the arguments (macOS only brought it forward): ask for the window.
                 guard let already, already.processIdentifier == pid else { return }
-                let info = windowRequest(window, pid: pid)
-                func post() {
-                    DistributedNotificationCenter.default().postNotificationName(windowNote, object: nil, userInfo: info, deliverImmediately: true)
-                }
-                post()
-                if !already.isFinishedLaunching { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { post() } }
+                ask(window: window, pid: pid)
             }
         }
+    }
+
+    /// The helper's answer once it has opened the window: the same window and PID.
+    static let windowAnswer = Notification.Name(ResumeRequest.appID + ".search.openedWindow")
+    static let askEvery = 0.5
+    static let askFor = 5.0
+
+    /// Ask again while there is no answer: a helper still starting up has no window listening yet.
+    /// Opening a window twice is harmless.
+    static func shouldAsk(elapsed: Double, answered: Bool) -> Bool { !answered && elapsed < askFor }
+
+    /// Asks every half second until the helper answers, for up to 5 s.
+    private static func ask(window: String, pid: pid_t) {
+        let center = DistributedNotificationCenter.default()
+        var answered = false
+        let observer = center.addObserver(forName: windowAnswer, object: nil, queue: .main) { note in
+            if note.userInfo?["window"] as? String == window, (note.userInfo?["pid"] as? Int).map(pid_t.init) == pid { answered = true }
+        }
+        let start = Date()
+        func tick() {
+            guard shouldAsk(elapsed: Date().timeIntervalSince(start), answered: answered) else {
+                center.removeObserver(observer)
+                if !answered { AppLog.write("search: the helper did not answer the request for its \(window) window") }
+                return
+            }
+            center.postNotificationName(windowNote, object: nil, userInfo: windowRequest(window, pid: pid), deliverImmediately: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + askEvery) { tick() }
+        }
+        tick()
     }
 
     // MARK: Gatekeeper

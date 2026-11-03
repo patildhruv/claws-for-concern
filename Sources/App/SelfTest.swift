@@ -607,6 +607,11 @@ enum SelfTest {
         check("usage: a running helper is asked by window and PID, on the notification the helper listens for",
               SearchHelper.windowNote.rawValue == "io.github.patildhruv.claws-for-concern.search.openWindow"
               && ask["window"] as? String == "usage" && ask["pid"] as? Int == 42 && ask.count == 2)
+        // A helper still starting up has no window listening yet: asked every 0.5 s until it answers, up to 5 s.
+        let asks = stride(from: 0.0, to: 10, by: SearchHelper.askEvery).filter { SearchHelper.shouldAsk(elapsed: $0, answered: false) }
+        check("usage: asked again every half second until the helper answers, for up to 5 s",
+              asks.count == 10 && asks.last == 4.5 && !SearchHelper.shouldAsk(elapsed: 1, answered: true)
+              && SearchHelper.windowAnswer.rawValue == "io.github.patildhruv.claws-for-concern.search.openedWindow")
 
         let id = "0f1e2d3c-4b5a-6978-8a9b-acbdcedfe0f1"
         let now = Date().timeIntervalSince1970

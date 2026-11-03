@@ -27,7 +27,7 @@ struct UsageWindow: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Usage")
         .toolbar { toolbar }
-        .searchable(text: $vm.filter.find, placement: .toolbar, prompt: "Find a session")
+        // Only a row that is shown and selected: the Session menu's Resume, Copy ID and Show Transcript.
         .focusedSceneValue(\.usagePick, UsagePick(session: vm.selectedSession))
         .onAppear {
             vm.attach(app: model, usage: usage)
@@ -38,6 +38,7 @@ struct UsageWindow: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             usage.refresh()
             vm.refreshLive()
+            vm.dayMayHaveChanged()
             currency.refreshIfNeeded()
         }
         .environmentObject(vm)
@@ -119,7 +120,7 @@ struct UsageWindow: View {
             }
             .pickerStyle(.menu)
             .frame(width: 130)
-            .help("Only sessions in which this model replied")
+            .help("Only sessions in which this model replied, with every model in them counted")
 
             CurrencyMenu()
 
@@ -128,6 +129,82 @@ struct UsageWindow: View {
             }
             .help("Read changed transcripts again")
             .disabled(usage.loading)
+        }
+        // Its own field (⌘F comes here while this window is in front), a fixed width so it never folds away.
+        ToolbarItem(placement: .primaryAction) {
+            UsageFindField(text: $vm.filter.find, onSubmit: vm.applyFind)
+                .frame(width: 190)
+                .help("Find a session by name, folder, project or ID")
+        }
+    }
+}
+
+extension Notification.Name {
+    /// ⌘F while the Usage window is in front: its Find field, not Search's.
+    static let focusUsageFind = Notification.Name("ClawsSearch.focusUsageFind")
+}
+
+/// Where Edit → Find… (⌘F) goes: the window in front's own field.
+enum FindTarget {
+    static func note(usageInFront: Bool) -> Notification.Name { usageInFront ? .focusUsageFind : .focusSearch }
+}
+
+/// The Usage window's Find: an NSSearchField, so ⌘F can focus it (a SwiftUI `.searchable` field cannot
+/// be focused from code on macOS 14). Esc clears it; Return applies it without waiting.
+struct UsageFindField: NSViewRepresentable {
+    @Binding var text: String
+    var onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = "Find a session"
+        field.delegate = context.coordinator
+        field.setAccessibilityLabel("Find a session")
+        context.coordinator.field = field
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text { field.stringValue = text }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: UsageFindField
+        weak var field: NSSearchField?
+        private var observer: NSObjectProtocol?
+
+        init(_ parent: UsageFindField) {
+            self.parent = parent
+            super.init()
+            observer = NotificationCenter.default.addObserver(forName: .focusUsageFind, object: nil, queue: .main) { [weak self] _ in
+                guard let field = self?.field else { return }
+                field.window?.makeFirstResponder(field)
+                field.currentEditor()?.selectAll(nil)
+            }
+        }
+
+        deinit { observer.map(NotificationCenter.default.removeObserver) }
+
+        func controlTextDidChange(_ note: Notification) {
+            guard let field = note.object as? NSSearchField else { return }
+            parent.text = field.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            switch selector {
+            case #selector(NSResponder.insertNewline(_:)):
+                parent.onSubmit()
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                (control as? NSSearchField)?.stringValue = ""
+                parent.text = ""
+                return true
+            default:
+                return false
+            }
         }
     }
 }
@@ -193,15 +270,20 @@ enum HelperWindow: String, CaseIterable {
 }
 
 /// Claws for Concern asks a running helper to bring up a window: `…search.openWindow` with the window
-/// and the helper's PID (another copy of the helper ignores it). It only opens a window.
+/// and the helper's PID (another copy of the helper ignores it). It only opens a window. The helper
+/// answers `…search.openedWindow` with the same two, so Claws stops asking (it asks again until then:
+/// a helper still starting up has no window listening yet).
 enum WindowRequest {
     static let note = Notification.Name(ResumeRequest.appID + ".search.openWindow")
+    static let answer = Notification.Name(ResumeRequest.appID + ".search.openedWindow")
 
     static func window(from userInfo: [AnyHashable: Any]?, pid: Int32 = getpid()) -> HelperWindow? {
         guard let name = userInfo?["window"] as? String, let w = HelperWindow(rawValue: name) else { return nil }
         if let target = userInfo?["pid"] as? Int, Int32(truncatingIfNeeded: target) != pid { return nil }
         return w
     }
+
+    static func answer(_ w: HelperWindow, pid: Int32 = getpid()) -> [String: Any] { ["window": w.rawValue, "pid": Int(pid)] }
 }
 
 extension View {
@@ -219,6 +301,8 @@ private struct WindowRequestListener: View {
                 guard let w = WindowRequest.window(from: note.userInfo) else { return }
                 openWindow(id: w.rawValue)
                 NSApp.activate()
+                DistributedNotificationCenter.default().postNotificationName(WindowRequest.answer, object: nil,
+                                                                             userInfo: WindowRequest.answer(w), deliverImmediately: true)
             }
     }
 }

@@ -100,7 +100,8 @@ struct SessionCommands: Commands {
                 .keyboardShortcut(",")
         }
         CommandGroup(after: .textEditing) {
-            Button("Find…") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
+            // The window in front's own field: the Usage window has its own Find.
+            Button("Find…") { NotificationCenter.default.post(name: FindTarget.note(usageInFront: usagePick != nil), object: nil) }
                 .keyboardShortcut("f")
         }
         CommandMenu("Session") {

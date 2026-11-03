@@ -8,13 +8,19 @@ import SwiftUI
 /// Rows are session IDs, as `UsageModel.bySession` has them: a session ID filed in two project folders
 /// (a copied transcript) counts once, so the totals do not count its replies twice. Search lists both
 /// copies; the window names and opens the copy whose project the figures came from.
+///
+/// The report is built in two steps (`UsageReport.prepare`, then `finish`): typing in Find only redoes
+/// the second, 150 ms after the last key.
 @MainActor
 final class UsageWindowModel: ObservableObject {
     @Published var filter: UsageFilter {
         didSet {
             guard filter != oldValue else { return }
             if filter.range != oldValue.range { remember?.set(filter.range.rawValue, Self.rangeKey) }
-            rebuild()
+            var a = filter, b = oldValue
+            a.find = ""
+            b.find = ""
+            if a == b { findSoon() } else { rebuild() }
         }
     }
     /// Where the range you picked is kept: the helper's defaults, never under `--demo` or in a test.
@@ -22,24 +28,33 @@ final class UsageWindowModel: ObservableObject {
     @Published var sortOrder = [KeyPathComparator(\UsageRow.lastActiveKey, order: .reverse)] {
         didSet { rows = report.rows.sorted(using: sortOrder) }
     }
+    /// The row you picked, in the table or near the limit. Cleared as soon as that row is no longer
+    /// shown, so the actions (and the Session menu) never act on a row you cannot see.
     @Published var selection: String?
     @Published private(set) var report = UsageReport()
     @Published private(set) var rows: [UsageRow] = []
     @Published private(set) var flash: String?
 
     static let rangeKey = "usageRange"
+    static let findDelay = 0.15
 
     private var usage: [String: SessionUsage] = [:]
     private var indexed: [String: [Session]] = [:]
     private var indexID: ObjectIdentifier?
     private(set) var sessions: [String: Session] = [:]
     private(set) var live: Set<String> = []
+    private var prepared: UsageReport.Prepared?
+    /// The day the report was built for: "Today" moves on at midnight.
+    private var builtFor: String?
     private weak var app: AppModel?
     private var bag: Set<AnyCancellable> = []
     private var liveTimer: Timer?
     private var flashTask: Task<Void, Never>?
+    private var findWork: DispatchWorkItem?
     private var rebuildQueued = false
     var now: () -> Date = Date.init
+    /// How many times the report was prepared (the Find-independent step): the self-test counts them.
+    private(set) var preparations = 0
 
     private var selectFirst: Bool
 
@@ -49,6 +64,11 @@ final class UsageWindowModel: ObservableObject {
         let saved = (remember?.value(Self.rangeKey) as? String).flatMap(UsageRange.init(rawValue:))
         self.filter = filter ?? UsageFilter(range: saved ?? .month)
         self.selectFirst = selectFirst
+        // Midnight: today is another day ("Today", "7 Days" and "30 Days" move on).
+        NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.rebuild() } }
+            .store(in: &bag)
     }
 
     // MARK: Inputs
@@ -105,6 +125,11 @@ final class UsageWindowModel: ObservableObject {
         rebuild()
     }
 
+    /// When the app comes forward: a new day since the report was built means a new report.
+    func dayMayHaveChanged() {
+        if builtFor != UsageDay.key(now(), .usage) { rebuild() }
+    }
+
     /// For the self-test and the snapshot: figures, names and running sessions given directly.
     func load(usage: [String: SessionUsage], sessions: [Session], live: Set<String>) {
         self.usage = usage
@@ -124,22 +149,52 @@ final class UsageWindowModel: ObservableObject {
         }
     }
 
+    /// Both steps: figures, names, running sessions, the day, range, project or model changed.
     func rebuild() {
+        findWork?.cancel()
+        findWork = nil
         // The copy whose project the figures came from, else the newest.
         sessions = indexed.compactMapValues { copies in
             copies.first { $0.projectDir == usage[$0.id]?.projectDir } ?? copies.max { $0.modified < $1.modified }
         }
         let info = sessions.mapValues { SessionInfo(title: $0.title, cwd: $0.cwd) }
-        report = UsageReport.build(usage: usage, info: info, live: live, filter: filter, now: now())
-        rows = report.rows.sorted(using: sortOrder)
+        let at = now()
+        builtFor = UsageDay.key(at, .usage)
+        let p = UsageReport.prepare(usage: usage, info: info, live: live, filter: filter, now: at)
+        prepared = p
+        preparations += 1
+        publish(UsageReport.finish(p, find: filter.find))
+    }
+
+    /// Find changed: only the second step, once typing pauses.
+    private func findSoon() {
+        findWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.applyFind() } }
+        findWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.findDelay, execute: work)
+    }
+
+    /// Now, without waiting (the self-test; Return in the field).
+    func applyFind() {
+        findWork?.cancel()
+        findWork = nil
+        guard let prepared else { rebuild(); return }
+        publish(UsageReport.finish(prepared, find: filter.find))
+    }
+
+    private func publish(_ r: UsageReport) {
+        report = r
+        rows = r.rows.sorted(using: sortOrder)
         if selectFirst, !sessions.isEmpty, let first = rows.first {
             selectFirst = false
             selection = first.id
         }
+        if let s = selection, !rows.contains(where: { $0.id == s }), !r.near.contains(where: { $0.id == s }) { selection = nil }
     }
 
     // MARK: The selection and its actions
 
+    /// The selected row, only while it is shown.
     var selectedRow: UsageRow? {
         guard let selection else { return nil }
         return rows.first { $0.id == selection } ?? report.near.first { $0.id == selection }
@@ -147,7 +202,8 @@ final class UsageWindowModel: ObservableObject {
 
     func session(_ id: String?) -> Session? { id.flatMap { sessions[$0] } }
 
-    var selectedSession: Session? { session(selection) }
+    /// The selected row's session, only while that row is shown.
+    var selectedSession: Session? { selectedRow.flatMap { sessions[$0.id] } }
 
     /// Search's entry point: the copy filed under the figures' project folder. The self-test records it.
     lazy var showInSearch: (String, String?) -> Void = { [weak self] id, projectDir in
