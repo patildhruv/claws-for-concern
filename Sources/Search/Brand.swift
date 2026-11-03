@@ -63,6 +63,10 @@ enum Brand {
     static let selection = adaptive(light: 0xF9E9E4, dark: 0x4F352D, lightHigh: 0xF2D1C6, darkHigh: 0x784939)
     /// Matched words: a stronger tint than the selection, so they still show in the selected row.
     static let highlight = adaptive(light: 0xF2D1C6, dark: 0x784939, lightHigh: 0xEAB9A7, darkHigh: 0x784939)
+    /// Quiet text (labels, notes, "est."). The system's secondary grey is 3.95:1 on white, under AA.
+    /// Light #666666: 5.74:1 on white, 5.04:1 on #F0F0F0. Dark #9A9A9A: 5.92:1 on #1E1E1E, 5.24:1 on the
+    /// panes' #282828, 4.96:1 on #2C2C2C. Increase Contrast: #4D4D4D 7.42:1 / #BDBDBD 7.43:1 at worst.
+    static let quietText = adaptive(light: 0x666666, dark: 0x9A9A9A, lightHigh: 0x4D4D4D, darkHigh: 0xBDBDBD)
 
     /// The Clawds' thought bubble (Bubble.swift), for Search's empty states too.
     static let bubbleFill = NSColor(name: nil) {

@@ -44,10 +44,79 @@ thought-bubble fill and stroke, which Bubble.swift now reads from it too.
 | Resume label on clay | ink, 5.90:1 | ink, 5.90:1 | same |
 | Selected row (body text on it) | `#F9E9E4`, 15.6:1 | `#4F352D`, 11.2:1 | `#F2D1C6` / `#784939`, plus a clay edge (6.1:1 / 4.0:1 against the fill) |
 | Match highlight (text on it) | `#F2D1C6`, 12.9:1 | `#784939`, 7.5:1 | `#EAB9A7` 10.5:1 / `#784939` 7.5:1 |
+| Quiet text (`Brand.quietText`: labels, notes, "est.") | `#666666`, 5.74:1 (5.04:1 on `#F0F0F0`) | `#9A9A9A`, 5.92:1 (5.24:1 on the panes' `#282828`, 4.96:1 on `#2C2C2C`) | `#4D4D4D` 7.42:1 / `#BDBDBD` 7.43:1 |
+| Context bar fill (a graphic: 3:1) | `#808080`, 3.95:1; 3.35:1 on the selected row | `#9A9A9A`, 5.92:1; 3.97:1 on the selected row | `#5E5E5E` / `#BDBDBD` |
+| Context bar near the limit | clay text shade, 5.69:1; 4.83:1 on the selected row | 6.37:1; 4.27:1 on the selected row | the clay text shades |
 
-  In the selected row all text is primary: the secondary grey would fall under 4.5:1 on the tint.
+  **The system's secondary grey is under AA in light mode**: `secondaryLabelColor` resolves to
+  `#808080` over white, 3.95:1 (computed from the resolved colour, 2026-11-03). Since 1.4 the rows'
+  folder, ID and preview lines, the detail pane's labels and quiet values, and everything in the
+  Usage section use `Brand.quietText` instead. Still on the system grey: the list's status line and
+  the excerpts' role labels (`.secondary`) and dates (`.tertiary`, 1.88:1 on white).
+  In the selected row all text is primary: the quiet grey would fall under 4.5:1 on the tint.
   The Resume button is the only control tinted clay; on bordered buttons the tint colours the labels,
   too faint on grey.
+
+## Usage
+
+The selected session's detail pane has a **Usage** section between the actions and the matching
+messages (`UsagePanel.swift`; wording in `UsageText.swift`, pure and self-tested). The fields are the
+client's picks from the 1.4 wireframe (docs/plan-1.4.md), in its groups:
+
+- **Context**: context now (a bar, "236K of 1M tokens · 24%", "Near the limit" in clay at
+  `isNearContextLimit`); over time (Swift Charts, one point per main-thread reply on a reply axis, so a
+  session resumed days later has no long gap; vertical lines at compactions; a dashed line at 80% of a
+  known window; at most 600 points, each stretch's lowest and highest kept); compactions (when,
+  automatic or manual, before → after, how long). A model with no known window gets tokens with no
+  share and no bar.
+- **Cost at API prices** (the heading's tooltip: on a subscription plan it is not the bill): cost
+  (Claude Code's own figure, else "est."; "At least … est." when a model could not be priced;
+  "Unknown" with the model named, never $0), tokens by kind, by model (always estimates), per hour of
+  Claude's work (hidden when the cost is unknown).
+- **Time**: Claude worked (across turns, the days it fell on, how long tools ran); turns (count,
+  longest). Both say "est." when Claude Code wrote no turn timings.
+- **Work**: tools used (the 8 most used and "+N more", all of them in the tooltip; MCP tools as
+  "server: tool", without Claude Code's `plugin_<name>_`, `claude_ai_` and `claude-in-` prefixes);
+  subagents (count, tokens, cost est.).
+- **Problems**: API errors (count by kind, the latest five with when and the HTTP status).
+
+Every dollar goes through `UsageModel.money` (it adds the second currency when that is on). A session
+without figures yet says so in words. The section folds to one line ("$64.77 est. · 85% context ·
+40 turns"); open or folded is remembered (`usageShown`, not under `--demo` or `--snapshot`).
+Lines changed are in the Usage window only, not here.
+
+**The list**: each row gets a line under its folder with a slim context bar (grey, clay near the
+limit) and the cost, once there are any figures (rows keep one height). **Sort** is a pop-up:
+Relevance, Recent, then Cost and Context, highest first. Four segments (about 330 pt) would push the
+toolbar's other items into its overflow menu at the window's narrower widths. Context sorts by the
+share of the window; a model with no known window counts its tokens against 1M, so 800K ranks as
+80%, as the near-limit rule has it. Sessions without the figure go last, newest first
+(`UsageRank.order`). The figures are read with the index (Refresh, ⌘R, coming back to the window) and
+the list re-sorts when they change. Figures are looked up by transcript (`UsageModel.usage(for:)`):
+a session ID filed under two project folders is two rows, each with its own.
+
+**Rows are known by their transcript, not their session ID** (`Hit.id` = `Session.key`, the file's
+path): 8 IDs here are filed under two project folders, and keyed by ID the list had duplicate
+identities and the second copy could never be selected. The list, the selection and the excerpts use
+the key; Copy ID, Resume and searching by ID use the ID. The Usage window's "Open in Search" calls
+`AppModel.show(sessionID:projectDir:)`: the copy filed under that project folder (else the most
+recently active one, ties by path), waiting for the first read if it is still going (typing
+meanwhile cancels it); an ID Search does not know says so in the status line. **It is done in one
+main-thread turn**: a search still on its way is dropped, a Return waiting for results is cancelled,
+and unless the results on screen are current and hold the session, the query is cleared and the
+empty query's results (every session, sorted: a few ms) are laid out and the session selected at
+once. Before 1.4 shipped it cleared the query and selected when the debounced search landed, and an
+independent review showed what fits in that gap: Return resumed the newest session instead of the
+one asked for, typing left the request stuck, and the request jumped back on a later search. The
+only Return that resumes a hit not yet on screen is still 1.3's: typed, then Return before the
+results arrive (resumes their first hit); `show` and further typing cancel it.
+
+Wording rules the review added: amounts under half a cent read "<$0.01" (`UsageFormat.usd`, so
+both windows); "tools ran X of it" only when tool time is within Claude's working time; estimated
+turns say "est." on the count, the longest and the folded line; one reply draws a dot (a line needs
+two points); By model rows are keyed by model ID (two IDs can read "Haiku 4.5"). A transcript's
+figures never fall back to another copy's: by ID only when there are no per-transcript figures at
+all (the demo).
 
 ## Resuming a session
 
@@ -228,8 +297,12 @@ $H --selftest                # unit checks + searches picked from your own trans
 $H --search "words" [--limit N] [--recent] [--scope prompts,replies,tools,subagents]
 $H --resume <id prefix>      # a resume request from the terminal: Claws must refuse it (see below)
 $H --snapshot out.png [--query q] [--appearance light|dark]   # offscreen, first hit selected
+   [--sort relevance|recent|cost|context] [--select <id prefix>] [--size WxH] [--usage-hidden]
+                             # (--size 1100x1500 shows the whole Usage section; saves no preference)
 $H --demo …                  # any of the above (and the window) on 12 made-up sessions, not yours
 ```
+
+A snapshot without `--demo` shows your own sessions: keep it out of the repository.
 
 The README's pictures, `docs/media/search-light.png` and `search-dark.png`, come from
 `tools/make-readme-media.sh`: `--demo --snapshot … --query '"rate limit"'` in each appearance. The demo

@@ -302,6 +302,56 @@ Plain `swiftc`, Swift 5 language mode, macOS 14+. Three binaries: the app (`-par
   the terminal, which Claws must refuse), `$H --snapshot out.png [--query q] [--appearance light|dark]`
   (offscreen, takes no focus), and `--demo` with any of them.
 
+## Usage (`Sources/Search/Usage*.swift`, `Pricing.swift`, guide: docs/usage.md)
+
+- **`SessionUsage` is the contract** between the reader and Search's panel and the Usage window:
+  change it only by adding fields, and bump `UsageCache.version` with any change to it or to the
+  reader's rules. `UsageStore.load()` (off the main thread, not reentrant) reads only transcripts
+  whose files changed (`UsageCache`, in `~/Library/Caches/<helper ID>/`, never under ~/.claude).
+- **Rules verified on 548 transcripts (2.1.316, 2026-11-03), each a trap the plan fell into:** a
+  reply's lines repeat its usage as it grows, so count each `message.id` once with its **last**
+  line; a fork subagent repeats the parent's replies (the first file owns a reply); `forkedFrom`
+  lines are another session's; workflow agents are in `subagents/workflows/<run>/agent-*.jsonl`,
+  and a run folder can be a link to another session's run (never followed).
+- **After the 2026-11-03 review** (`UsageTests.review`, docs/usage.md "Rules after the review"):
+  lines only from successful Edit/Write calls, each call once; tool time never a question or plan
+  and clipped to the turns' working time; turns one by one (record, else estimate); a linked
+  transcript read through its target, an ID filed twice read as one conversation; **no input may
+  trap**: numbers through `lenientNumber`/`lenientCount` (finite, 0…1e12), dates 2020–2100, sums
+  saturating.
+- **Claude Code's `cost-state` is per process**: a resumed process restarts it at zero, and it bills
+  calls no transcript holds. Its figure is used only when current and covering ≥ 99% of the
+  transcript's output and cache reads (`UsageBuilder.covers`, PM decision); else the estimate, "est.".
+- **Prices and windows are dated tables with sources** (`Pricing`, `ContextWindows`); an unknown
+  model gets no estimate (`cost.unpriced`) and no percentage. Re-check both at each release.
+- **Never commit `tools/usage-crosscheck.py`'s output**: it describes your own sessions. It must
+  show exact agreement on every field; estimates within 3% of covering Claude Code figures.
+- Commands: `$H --usage <id prefix>`, `$H --usage-dump` (JSON), both with `--demo`;
+  `tools/usage-crosscheck.py` after `./build.sh --no-install`.
+- **Screens** (Search: `UsagePanel.swift`, wording in `UsageText.swift`; window: `Usage{Window,Sections,
+  WindowModel,Report}.swift`, guide docs/usage-window.md). Both read one shared `UsageModel`. Every
+  estimate says "est.", cost is "at API prices", unknown is never $0, and every dollar goes through
+  `usage.money` (it adds the second currency). In Search, look figures up with `usage.usage(for:
+  session)`, never `bySession[id]`. In the window, rows and every total are per session ID
+  (`bySession`), never summed over `byFile`.
+- **Rows and the selection are keyed by transcript** (`Hit.id` = `Session.key`, the path). Copy ID,
+  Resume and searching by ID stay on the session ID. Other windows open a session only through
+  `AppModel.show(sessionID:projectDir:)`. It finishes in one main-thread turn, so a quick Return can
+  never resume a different session.
+- **The second currency is opt-in; off means no request at all.** Frankfurter v2, at most one GET a
+  day for all 16 currencies, fixed headers (`Frankfurter.headers`). The README's Privacy section
+  quotes the request, so change both together. `--demo` uses made-up rates.
+- **Usage… starts a new helper with `--window usage`.** That window is declared first because SwiftUI
+  opens the first scene and macOS 14 can't hold one back. A running helper is sent
+  `…search.openWindow {window, pid}` instead. Running sessions come from Claws' session files, read
+  only (`LiveSessions`).
+- **AA greys:** the system secondary label is 3.95:1 on white, under AA. Quiet text is
+  `Brand.quietText`, and graphic colours are in `UsageStyle`.
+- More commands: `$H --snapshot … [--select <id prefix>] [--sort cost] [--size WxH] [--usage-hidden]`
+  and `$H [--demo] --snapshot-usage out.png [--range 7d] [--appearance dark]` save no preference.
+  Without `--demo` they show your own sessions, so keep them in the scratchpad. `$H --currency-status`
+  makes no request; `$H --fetch-rates` makes one GET and stores nothing.
+
 ## Settings, placement, the Dock
 
 - Every preference is a UserDefaults key in `Settings.Key`; the Settings window binds the same keys with

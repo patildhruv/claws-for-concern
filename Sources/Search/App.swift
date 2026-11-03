@@ -11,7 +11,20 @@ enum Main {
         func done(_ code: Int32) -> Never { Demo.deactivate(); exit(code) }
         if args.contains("--search") { done(CLI.search(args)) }
         if args.contains("--resume") { done(CLI.resume(args)) }
+        if args.contains("--usage-dump") { done(UsageCLI.dump()) }
+        if args.contains("--usage") { done(UsageCLI.show(args)) }
+        if args.contains("--currency-status") { done(MainActor.assumeIsolated { RateCLI.status() }) }
+        if args.contains("--fetch-rates") { done(MainActor.assumeIsolated { RateCLI.fetch() }) }
+        if args.contains("--snapshot-usage") { done(MainActor.assumeIsolated { UsageSnapshot.run(args) }) }
         if args.contains("--snapshot") { done(MainActor.assumeIsolated { Snapshot.run(args) }) }
+        // The crab menu's Usage… opens only the Usage window (`--window usage`).
+        HelperWindow.first = HelperWindow.atLaunch(args)
+        MainActor.assumeIsolated {
+            // The second currency: your setting, and Frankfurter at most once a day while it is on. The demo
+            // has made-up rates and never asks the network.
+            if Demo.active { SecondCurrencySetting.shared.useDemo(code: CLI.value(args, "--currency")) }
+            else { SecondCurrencySetting.shared.useDefaults(UserDefaults.standard, fetcher: Frankfurter.fetch) }
+        }
         ClawsSearchApp.main()
     }
 }
@@ -21,16 +34,31 @@ enum Main {
 struct ClawsSearchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel()
+    @StateObject private var usage = UsageModel()
 
     var body: some Scene {
-        // The app is "Claws Search" (Dock, menus, ⌘-Tab); its window says what it does, like the crab menu.
-        Window("Search Sessions", id: "main") {
-            ContentView()
-                .environmentObject(model)
-                .frame(minWidth: 820, minHeight: 480)
+        // SwiftUI opens the first scene at launch, and macOS 14 cannot hold one back: the window asked
+        // for is declared first, so Usage… from the crab menu brings up only Usage.
+        let order = HelperWindow.order(first: HelperWindow.first)
+        window(order[0]).commands { SessionCommands(model: model) }
+        window(order[1])
+    }
+
+    /// The app is "Claws Search" (Dock, menus, ⌘-Tab); each window says what it does, like the crab menu.
+    /// Usage is every session's usage, in the same process, so the figures are read once.
+    private func window(_ w: HelperWindow) -> some Scene {
+        Window(w.title, id: w.rawValue) {
+            Group {
+                switch w {
+                case .search: ContentView().frame(minWidth: 820, minHeight: 480)
+                case .usage: UsageWindow().frame(minWidth: 900, minHeight: 560)
+                }
+            }
+            .environmentObject(model)
+            .environmentObject(usage)
+            .opensRequestedWindows()
         }
-        .defaultSize(width: 1180, height: 760)
-        .commands { SessionCommands(model: model) }
+        .defaultSize(w.defaultSize)
     }
 }
 
@@ -60,6 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct SessionCommands: Commands {
     @ObservedObject var model: AppModel
+    /// The Usage window's row, while that window is in front.
+    @FocusedValue(\.usagePick) private var usagePick
 
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
@@ -70,11 +100,12 @@ struct SessionCommands: Commands {
                 .keyboardShortcut(",")
         }
         CommandGroup(after: .textEditing) {
-            Button("Find…") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
+            // The window in front's own field: the Usage window has its own Find.
+            Button("Find…") { NotificationCenter.default.post(name: FindTarget.note(usageInFront: usagePick != nil), object: nil) }
                 .keyboardShortcut("f")
         }
         CommandMenu("Session") {
-            let s = model.selectedSession
+            let s = usagePick.map(\.session) ?? model.selectedSession
             Button("Resume") { if let s { model.resume(s) } }
                 .keyboardShortcut("o")
                 .disabled(s?.canResume != true)
@@ -131,7 +162,7 @@ enum AboutBox {
 }
 
 enum CLI {
-    private static func value(_ args: [String], _ flag: String) -> String? {
+    static func value(_ args: [String], _ flag: String) -> String? {
         guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
         return args[i + 1]
     }
@@ -220,9 +251,10 @@ enum CLI {
     }
 }
 
-/// `--snapshot <png> [--query <q>] [--appearance light|dark]`: indexes, searches, selects the first hit,
-/// renders the window offscreen and quits. With `--demo`, only made-up sessions (the README's pictures).
-/// It never shows a window or takes focus, and needs no screen recording permission.
+/// `--snapshot <png> [--query <q>] [--appearance light|dark] [--sort relevance|recent|cost|context]
+/// [--select <id prefix>] [--size WxH] [--usage-hidden]`: indexes, searches, selects the first hit (or
+/// the one given), renders the window offscreen and quits. With `--demo`, only made-up sessions (the
+/// README's pictures). It never shows a window or takes focus, and needs no screen recording permission.
 enum Snapshot {
     @MainActor
     static func run(_ args: [String]) -> Int32 {
@@ -235,16 +267,23 @@ enum Snapshot {
         func wait(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
         let model = AppModel()
-        while model.indexing { wait(0.2) }
+        model.remembers = false     // --sort and --usage-hidden are for this picture, not your next search
+        let usage = UsageModel()
+        model.attach(usage)
+        while model.indexing || usage.updated == nil { wait(0.2) }
+        if let sort = value("--sort").flatMap(SortMode.init(rawValue:)) { model.sort = sort }
+        if args.contains("--usage-hidden") { model.usageShown = false }
         model.query = value("--query") ?? ""
         wait(0.5)
-        if let first = model.hits.first?.id { model.selection = first }
+        let pick = value("--select").flatMap { p in model.hits.first { $0.session.id.hasPrefix(p) } } ?? model.hits.first
+        if let pick { model.selection = pick.id }
         wait(1.5)   // the row previews and the detail pane
 
         // A little under the window's default size, so a 2x PNG for the README stays under ~400 KB.
-        let size = NSSize(width: 1100, height: 700)
+        let wh = value("--size")?.split(separator: "x").compactMap { Double($0) } ?? []
+        let size = wh.count == 2 ? NSSize(width: wh[0], height: wh[1]) : NSSize(width: 1100, height: 700)
         // As in use: the key window's controls (the Resume button in clay, not inactive grey).
-        let host = NSHostingView(rootView: ContentView().environmentObject(model).environment(\.controlActiveState, .key)
+        let host = NSHostingView(rootView: ContentView().environmentObject(model).environmentObject(usage).environment(\.controlActiveState, .key)
             .frame(width: size.width, height: size.height))
         host.sceneBridgingOptions = [.toolbars, .title]
         let window = KeyLookingWindow(contentRect: NSRect(origin: .zero, size: size),

@@ -15,6 +15,8 @@ extension Color {
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var usage: UsageModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // A split view, not a sidebar: the results are content, and a translucent sidebar would put
@@ -34,12 +36,16 @@ struct ContentView: View {
         .navigationTitle("Search Sessions")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                // A pop-up, not segments: four segments (about 330 pt) would push the other toolbar
+                // items into the overflow menu at the window's narrower widths.
                 Picker("Sort", selection: $model.sort) {
-                    Text("Relevance").tag(SortMode.relevance)
-                    Text("Recent").tag(SortMode.recent)
+                    ForEach([SortMode.relevance, .recent], id: \.self) { Text($0.title).tag($0) }
+                    Divider()
+                    ForEach([SortMode.cost, .context], id: \.self) { Text($0.title).tag($0) }
                 }
-                .pickerStyle(.segmented)
-                .help("Sort results")
+                .pickerStyle(.menu)
+                .fixedSize()
+                .help("Sort results: by relevance, newest first, or highest cost or context first")
 
                 Menu {
                     Toggle("Your prompts", isOn: model.binding(.prompts))
@@ -59,11 +65,17 @@ struct ContentView: View {
                 }
                 .help("Re-read changed transcripts (⌘R)")
                 .disabled(model.indexing)
+
+                Button { openWindow(id: "usage") } label: {
+                    Label("Usage", systemImage: "chart.bar.xaxis")
+                }
+                .help("Every session's usage and cost")
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refresh()
         }
+        .onAppear { model.attach(usage) }
     }
 
     /// What the crab says when there is no session to show.
@@ -78,6 +90,7 @@ struct ContentView: View {
 
 struct ResultsColumn: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var usage: UsageModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -90,7 +103,10 @@ struct ResultsColumn: View {
                 // (arrows move the selection, Return resumes), so a click goes back there too.
                 List(model.hits) { hit in
                     let selected = hit.id == model.selection
-                    ResultRow(hit: hit, snippet: model.snippets[hit.id], selected: selected)
+                    // The usage line only once there are figures to show, so a Search without them
+                    // keeps its rows as they were.
+                    ResultRow(hit: hit, snippet: model.snippets[hit.id], selected: selected,
+                              usage: usage.bySession.isEmpty ? nil : .some(usage.usage(for: hit.session)))
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) { model.selection = hit.id; model.resume(hit.session) }
                         .simultaneousGesture(TapGesture().onEnded {
@@ -134,11 +150,14 @@ struct ResultRow: View {
     let hit: Hit
     let snippet: AttributedString?
     var selected = false
+    /// nil: no usage line. `.some(nil)`: a line kept empty, for a session without figures yet.
+    var usage: SessionUsage?? = nil
 
     var body: some View {
         let s = hit.session
-        // On the clay selection the secondary grey would fall under 4.5:1: all text is primary there.
-        let quiet: HierarchicalShapeStyle = selected ? .primary : .secondary
+        // On the clay selection the quiet grey would fall under 4.5:1: all text is primary there.
+        // Elsewhere `Color.quiet`, not the system's secondary grey, which is 3.95:1 on white.
+        let quiet: Color = selected ? .primary : .quiet
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(s.title)
@@ -163,6 +182,9 @@ struct ResultRow: View {
             }
             .font(.caption)
             .foregroundStyle(quiet)
+            if let figures = usage {
+                RowUsage(figures: figures, selected: selected)
+            }
             // Always two lines, so rows keep one height and the list doesn't jump as previews arrive.
             Text(snippet ?? AttributedString(" "))
                 .font(.callout)
@@ -243,6 +265,8 @@ struct DetailView: View {
                 header
                 actions
                 Divider()
+                UsageSection(session: session)
+                Divider()
                 matches
             }
             .padding(20)
@@ -275,7 +299,7 @@ struct DetailView: View {
                         } else if let first = session.recordedCwd {
                             Text("Conversation began in \(Paths.abbreviate(first)); Claude Code files it under this folder.")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.quiet)
                         }
                     }
                 }
@@ -285,12 +309,12 @@ struct DetailView: View {
                 }
                 GridRow {
                     label("Name from")
-                    Text(session.titleSource.rawValue).foregroundStyle(.secondary)
+                    Text(session.titleSource.rawValue).foregroundStyle(Color.quiet)
                 }
                 if !session.altTitles.isEmpty {
                     GridRow {
                         label("Also named")
-                        Text(session.altTitles.joined(separator: " · ")).foregroundStyle(.secondary).textSelection(.enabled)
+                        Text(session.altTitles.joined(separator: " · ")).foregroundStyle(Color.quiet).textSelection(.enabled)
                     }
                 }
                 if let branch = session.gitBranch, branch != "HEAD" {
@@ -305,7 +329,7 @@ struct DetailView: View {
                 }
                 GridRow {
                     label("Transcript")
-                    Text(transcriptLine).foregroundStyle(.secondary)
+                    Text(transcriptLine).foregroundStyle(Color.quiet)
                 }
                 if let e = session.entrypoint, e != "cli" {
                     GridRow { label("Started by"); Text(e == "sdk-cli" ? "claude -p or the SDK (headless)" : e) }
@@ -316,7 +340,7 @@ struct DetailView: View {
 
     private var transcriptLine: String {
         var parts = [ByteCountFormatter.string(fromByteCount: Int64(session.fileSize), countStyle: .file),
-                     "\(session.promptCount) prompts"]
+                     "\(session.promptCount) prompt\(session.promptCount == 1 ? "" : "s")"]
         if session.subagentCount > 0 {
             parts.append("\(session.subagentCount) subagent transcript\(session.subagentCount == 1 ? "" : "s")")
         }
@@ -347,14 +371,14 @@ struct DetailView: View {
             }
             Text(session.resumeCommand() ?? "No resume command: this is not a session ID.")
                 .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.quiet)
                 .textSelection(.enabled)
         }
     }
 
     @ViewBuilder
     private var matches: some View {
-        let ready = model.excerptSessionID == session.id
+        let ready = model.excerptKey == session.key
         VStack(alignment: .leading, spacing: 10) {
             Text(heading(ready: ready))
                 .font(.headline)
@@ -378,11 +402,8 @@ struct DetailView: View {
         return "\(total) matching message\(total == 1 ? "" : "s")\(more)"
     }
 
-    private func label(_ text: String) -> some View {
-        Text(text)
-            .foregroundStyle(.secondary)
-            .gridColumnAlignment(.trailing)
-    }
+    /// The same width as the Usage section's labels, so both grids line up.
+    private func label(_ text: String) -> some View { DetailLabel(text) }
 }
 
 struct ExcerptView: View {
