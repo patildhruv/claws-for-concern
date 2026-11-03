@@ -177,6 +177,9 @@ enum SelfTest {
         // Usage figures: the reader on made-up transcripts, the tables, the cache, the demo's figures,
         // then your own transcripts (docs/usage.md).
         for (name, ok) in UsageTests.run() + UsageTests.real() { check(name, ok) }
+        // The Usage window: ranges, totals, CSV, the second currency (no network), Claws' live files,
+        // the launch window and Open in Search (docs/usage-window.md).
+        for (name, ok) in MainActor.assumeIsolated({ UsageWindowTests.run() }) { check(name, ok) }
 
         // Last: it switches the home folder for the whole process, and back.
         for (name, ok) in MainActor.assumeIsolated({ demo() }) { check(name, ok) }

@@ -13,10 +13,12 @@ final class UsageWindowModel: ObservableObject {
     @Published var filter: UsageFilter {
         didSet {
             guard filter != oldValue else { return }
-            if filter.range != oldValue.range && !Demo.active { UserDefaults.standard.set(filter.range.rawValue, forKey: Self.rangeKey) }
+            if filter.range != oldValue.range { remember?.set(filter.range.rawValue, Self.rangeKey) }
             rebuild()
         }
     }
+    /// Where the range you picked is kept: the helper's defaults, never under `--demo` or in a test.
+    private let remember: SettingStore?
     @Published var sortOrder = [KeyPathComparator(\UsageRow.lastActiveKey, order: .reverse)] {
         didSet { rows = report.rows.sorted(using: sortOrder) }
     }
@@ -41,8 +43,10 @@ final class UsageWindowModel: ObservableObject {
 
     private var selectFirst: Bool
 
-    init(filter: UsageFilter? = nil, selectFirst: Bool = false) {
-        let saved = Demo.active ? nil : UserDefaults.standard.string(forKey: Self.rangeKey).flatMap(UsageRange.init(rawValue:))
+    init(filter: UsageFilter? = nil, selectFirst: Bool = false,
+         remember: SettingStore? = Demo.active ? nil : UserDefaults.standard) {
+        self.remember = remember
+        let saved = (remember?.value(Self.rangeKey) as? String).flatMap(UsageRange.init(rawValue:))
         self.filter = filter ?? UsageFilter(range: saved ?? .month)
         self.selectFirst = selectFirst
     }

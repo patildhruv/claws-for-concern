@@ -351,6 +351,37 @@ final class SecondCurrencySetting: ObservableObject {
     }
 }
 
+/// `ClawsSearch --currency-status`: the setting and the cached rates, from the helper's defaults; no
+/// network. `ClawsSearch --fetch-rates`: one request to Frankfurter, the answer printed, nothing stored.
+enum RateCLI {
+    @MainActor
+    static func status() -> Int32 {
+        let s = SecondCurrencySetting(store: UserDefaults.standard)
+        print("second currency: \(s.code ?? "off")")
+        print(s.statusLine)
+        if let t = s.table {
+            print("cached rates fetched \(t.fetched.formatted(date: .abbreviated, time: .shortened)):")
+            for (code, r) in t.rates.sorted(by: { $0.key < $1.key }) { print("  \(code) \(r.perUSD) (\(r.date))") }
+        }
+        if let a = s.store.value(SecondCurrencySetting.Key.attempt) as? Date { print("last request: \(a.formatted())") }
+        return 0
+    }
+
+    @MainActor
+    static func fetch() -> Int32 {
+        let s = SecondCurrencySetting(store: MemoryStore(), fetcher: Frankfurter.fetch)
+        print("GET \(Frankfurter.url())")
+        s.set(Currencies.defaultCode)
+        let start = Date()
+        while s.fetching && Date().timeIntervalSince(start) < 20 { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        print(s.statusLine)
+        for (code, r) in (s.table?.rates ?? [:]).sorted(by: { $0.key < $1.key }) {
+            print("  \(code) \(r.perUSD) (\(r.date))  $12.40 = \(CurrencyFormat.amount(12.4 * r.perUSD, code: code))")
+        }
+        return s.active == nil ? 1 : 0
+    }
+}
+
 extension UsageModel {
     /// The second currency alone ("₹1.17K"), when it is on.
     func secondMoney(_ usd: Double) -> String? {

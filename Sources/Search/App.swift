@@ -13,6 +13,8 @@ enum Main {
         if args.contains("--resume") { done(CLI.resume(args)) }
         if args.contains("--usage-dump") { done(UsageCLI.dump()) }
         if args.contains("--usage") { done(UsageCLI.show(args)) }
+        if args.contains("--currency-status") { done(MainActor.assumeIsolated { RateCLI.status() }) }
+        if args.contains("--fetch-rates") { done(MainActor.assumeIsolated { RateCLI.fetch() }) }
         if args.contains("--snapshot-usage") { done(MainActor.assumeIsolated { UsageSnapshot.run(args) }) }
         if args.contains("--snapshot") { done(MainActor.assumeIsolated { Snapshot.run(args) }) }
         // The crab menu's Usage… opens only the Usage window (`--window usage`).
