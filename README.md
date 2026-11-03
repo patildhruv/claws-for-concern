@@ -55,7 +55,7 @@ Each finished session keeps its own Clawd, so a row of them stays easy to tell a
 - **Right-click**: Open, Dismiss, Copy Recap, Copy Resume Command, Dismiss All.
 - **Drag**: move the whole row anywhere (see below).
 - **⌃⌥⌘C** (or a shortcut of your own): jump to the most urgent session, from anywhere.
-- **Menu bar crab**: how many sessions need you, the list, Pause, and Settings.
+- **Menu bar crab**: how many sessions need you, the list, Search, Usage, Pause, and Settings.
 
 A Clawd never appears for a session you are already looking at. It goes away when you have actually
 seen the session (its tab or pane in front, and you active for a moment), when you click it, or when
@@ -98,6 +98,41 @@ and subagents, plus each session's name, folder and ID. ⌘, from there opens Se
 - **Light on your Mac.** Search is a small app of its own inside Claws for Concern. It builds its index
   when you open it (a few seconds for hundreds of sessions) and quits when you close the window, so the
   memory it needs is never held by the always-running app.
+
+## See what your sessions use
+
+Choose **Usage…** from the menu bar crab, or the chart button in Search's toolbar, for every Claude Code
+session's usage and cost in one window.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/usage-dark.png">
+  <img src="docs/media/usage-light.png" alt="The Usage window on made-up sessions, last 30 days: tiles for cost at API prices ($269.41 est.), tokens written by Claude, Claude's working time, 12 sessions, lines changed and compactions; cost per day as bars stacked by project; a running session at 85% of its context window; and the table of all sessions with Open in Search, Resume, Copy ID and Export CSV">
+</picture>
+
+- **Filter** to today, the last 7 or 30 days, or all time; to one project or one model; or find a session
+  by name, folder or ID.
+- **Totals**: cost, tokens written by Claude, Claude's working time, sessions, lines changed, compactions.
+- **Cost per day, by project**, and the running sessions **near their context limit** (80% of the window
+  or more), so you can wrap one up before it compacts.
+- **All sessions**, sortable by any column: project, last active, context, compactions, cost, tokens
+  written, Claude's time and lines. Return opens the session in Search; **Resume**, **Copy ID** and
+  **Export CSV** (what the filters show) are one click away.
+- **By project, by model, and when Claude works**: Claude's working time by weekday and hour.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/usage-more-dark.png">
+  <img src="docs/media/usage-more-light.png" alt="The Usage window's last row: cost by project as bars, cost by model with each model's share, and a weekday by hour map of Claude's working time, busiest in the late morning and early afternoon">
+</picture>
+
+**What the figures mean.** Cost is at Anthropic's API prices: what the tokens would cost on the API. On a
+Pro or Max plan it is not your bill. It is Claude Code's own figure when the session's transcript has a
+current one; otherwise it is worked out from the session's tokens and marked **est.** A model with no
+known price makes the cost unknown, never $0. Lines changed are Claude Code's count, or counted from
+Claude's edits (est.). Context is how much of the model's window the conversation fills after its last reply.
+
+**A second currency**, if you like: the **$** menu in the toolbar adds rupees (or euros, pounds, yen and a
+dozen more) next to every dollar amount, in Search too, at a rate fetched at most once a day. It stays off
+until you turn it on.
 
 ## Pick up where Ghostty left off
 
@@ -207,7 +242,8 @@ flowchart TB
 
 ## Privacy
 
-Everything stays on your Mac except the recap request: Claude's final message of a turn (up to
+Everything stays on your Mac except the recap request, and the exchange rate if you turn on a second
+currency (below). The recap request: Claude's final message of a turn (up to
 12,000 characters) goes to Anthropic through your own Claude Code login, the same way every Claude
 Code request does. Turn recaps off in Settings → Recaps and the bubble shows the first sentence instead.
 
@@ -216,7 +252,18 @@ reads your code or your terminal. Its files live in `~/Library/Application Suppo
 
 Search reads your transcripts in `~/.claude/projects` on your Mac, only while its window is open, and
 sends nothing anywhere. It never looks inside Documents, Desktop, Downloads, iCloud or other protected
-folders, so macOS never asks you about them on its behalf.
+folders, so macOS never asks you about them on its behalf. The Usage window reads the same transcripts,
+and the session files the hooks write to see which sessions are running; it only reads them.
+
+The one exception is the second currency, and only once you turn it on. Then, at most once a day, Search
+asks [Frankfurter](https://frankfurter.dev) (a free, open-source exchange-rate service run from
+central-bank data) for the day's rates: a single HTTPS request to
+`https://api.frankfurter.dev/v2/rates?base=USD&quotes=AED,AUD,BRL,CAD,CHF,CNY,EUR,GBP,HKD,INR,JPY,KRW,MXN,SEK,SGD,ZAR`
+with the headers `User-Agent: ClawsSearch`, `Accept: application/json` and `Accept-Language: en`, the
+same for everyone. It names every currency on offer, so it does not say which one you picked; nothing
+about you or your sessions is in it. As with any connection, the service sees your IP address; its
+documentation says it does not log IP addresses or request URLs, and it runs behind Cloudflare. The
+answer is kept on your Mac with its date. Turned off, there is no request at all.
 
 ## Settings
 
@@ -288,7 +335,7 @@ B="build/Claws for Concern.app/Contents/MacOS/ClawsForConcern"
 "$B" --selftest                         # unit checks; prints ALL PASS
 "$B" --terminals                        # what the terminal adapters see, per session
 "$B" --help                             # the other commands
-tools/make-readme-media.sh              # re-render the images in this README (Search uses demo data)
+tools/make-readme-media.sh              # re-render the images in this README (Search and Usage use demo data)
 ```
 
 Plain `swiftc`, no Xcode project and no dependencies. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules,
