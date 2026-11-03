@@ -284,7 +284,8 @@ struct CostPerDaySection: View {
         VStack(alignment: .leading, spacing: 10) {
             SectionTitle(title: "Cost per day, by project")
             if r.days.isEmpty {
-                Text("No cost in this range.").font(.callout).foregroundStyle(UsageStyle.secondaryText)
+                Text(r.totals.costUnknown ? "No API price for these sessions' models: their cost is unknown." : "No cost in this range.")
+                    .font(.callout).foregroundStyle(UsageStyle.secondaryText)
                     .frame(maxWidth: .infinity, minHeight: 200, alignment: .center)
             } else {
                 legend(r)

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// `--snapshot-usage <png> [--range today|7d|30d|all] [--appearance light|dark] [--currency INR]
-/// [--select first] [--size WxH] [--part breakdown]`: reads the figures, renders the Usage window
+/// [--select first] [--size WxH] [--part breakdown] [--model NAME] [--find TEXT]`: reads the figures, renders the Usage window
 /// offscreen and quits. `--part breakdown` renders only its last row (by project, by model, when Claude
 /// works), at the given width. Like `--snapshot`, it never shows a window or takes focus. With
 /// `--demo`, made-up sessions only (the README's pictures); without it, your own, which stay on your
@@ -13,7 +13,7 @@ enum UsageSnapshot {
     static func run(_ args: [String]) -> Int32 {
         guard let path = CLI.value(args, "--snapshot-usage") else {
             print("usage: ClawsSearch [--demo] --snapshot-usage <out.png> [--range today|7d|30d|all] [--appearance light|dark]"
-                  + " [--currency INR] [--select first] [--size WxH] [--part breakdown]")
+                  + " [--currency INR] [--select first] [--size WxH] [--part breakdown] [--model NAME] [--find TEXT]")
             return 2
         }
         let app = NSApplication.shared
@@ -31,7 +31,9 @@ enum UsageSnapshot {
         if let s = CLI.value(args, "--size")?.split(separator: "x").compactMap({ Double($0) }), s.count == 2 {
             size = NSSize(width: s[0], height: s[1])
         }
-        let filter = UsageFilter(range: CLI.value(args, "--range").flatMap(UsageRange.init(rawValue:)) ?? .month)
+        var filter = UsageFilter(range: CLI.value(args, "--range").flatMap(UsageRange.init(rawValue:)) ?? .month)
+        filter.model = CLI.value(args, "--model")
+        filter.find = CLI.value(args, "--find") ?? ""
         let appearance = CLI.value(args, "--appearance").map { NSAppearance(named: $0 == "dark" ? .darkAqua : .aqua) }
 
         let view: NSView

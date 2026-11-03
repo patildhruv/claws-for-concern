@@ -162,8 +162,21 @@ final class UsageWindowModel: ObservableObject {
         builtFor = UsageDay.key(at, .usage)
         let p = UsageReport.prepare(usage: usage, info: info, live: live, filter: filter, now: at)
         prepared = p
+        unfiltered = nil
         preparations += 1
-        publish(UsageReport.finish(p, find: filter.find))
+        publish(finish(p))
+    }
+
+    /// The report with no Find, kept until the next full build: clearing Find is the costliest step
+    /// (every session; 26 ms for all time on 542 real sessions), so it is done once.
+    private var unfiltered: UsageReport?
+
+    private func finish(_ p: UsageReport.Prepared) -> UsageReport {
+        let blank = filter.find.trimmingCharacters(in: .whitespaces).isEmpty
+        if blank, let unfiltered { return unfiltered }
+        let r = UsageReport.finish(p, find: filter.find)
+        if blank { unfiltered = r }
+        return r
     }
 
     /// Find changed: only the second step, once typing pauses.
@@ -179,7 +192,7 @@ final class UsageWindowModel: ObservableObject {
         findWork?.cancel()
         findWork = nil
         guard let prepared else { rebuild(); return }
-        publish(UsageReport.finish(prepared, find: filter.find))
+        publish(finish(prepared))
     }
 
     private func publish(_ r: UsageReport) {
