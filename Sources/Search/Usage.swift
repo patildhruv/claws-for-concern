@@ -263,7 +263,7 @@ final class UsageStore: @unchecked Sendable {
     func load() -> [String: SessionUsage] {
         if Demo.active { byID = Demo.usage; return byID }
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey, .isSymbolicLinkKey]
         func list(_ dir: URL) -> [URL] {
             (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
         }

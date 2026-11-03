@@ -7,18 +7,22 @@ import Foundation
 /// session's events, file by file in order, through `UsageBuilder`. Facts and traps: docs/usage.md.
 enum UsageReader {
     /// Subagent transcripts: `<session>/subagents/*.jsonl` (Agent calls) and
-    /// `<session>/subagents/workflows/<run>/agent-*.jsonl` (workflow agents), sorted by path.
+    /// `<session>/subagents/workflows/<run>/agent-*.jsonl` (workflow agents), sorted by path. A link is
+    /// never followed: a resumed session's run folder can be a link to the run in the session that
+    /// started it, whose agents count there.
     static func subagentFiles(for transcript: URL, list: (URL) -> [URL] = Self.list) -> [URL] {
+        func linked(_ u: URL) -> Bool { (try? u.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true }
         let dir = transcript.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
-        var out = list(dir).filter { $0.pathExtension == "jsonl" }
-        for run in list(dir.appendingPathComponent("workflows", isDirectory: true)) {
-            out += list(run).filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("agent-") }
+        var out = list(dir).filter { $0.pathExtension == "jsonl" && !linked($0) }
+        for run in list(dir.appendingPathComponent("workflows", isDirectory: true)) where !linked(run) {
+            out += list(run).filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("agent-") && !linked($0) }
         }
         return out.sorted { $0.path < $1.path }
     }
 
     static func list(_ dir: URL) -> [URL] {
-        (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isSymbolicLinkKey],
+                                                      options: [.skipsHiddenFiles])) ?? []
     }
 
     /// One session, in this thread.
