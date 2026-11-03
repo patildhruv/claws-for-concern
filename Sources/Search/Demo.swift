@@ -53,6 +53,23 @@ enum Demo {
         let turns: [Turn]
     }
 
+    /// When a session's last line was written: about `hoursAgo` before now, at a fixed working-hours
+    /// clock time on that day, so the pictures look alike whenever they are made (a render at 06:40
+    /// put every session in the night). The session runs from 09:00 at the earliest and ends by 19:00;
+    /// never in the future, never more than 13.5 days back (the demo spans two weeks).
+    static func end(of s: Session, now: Date, calendar: Calendar = .usage) -> Date {
+        let hours = usageSpecs[s.id]?.hours ?? 0.1
+        let day = calendar.startOfDay(for: now.addingTimeInterval(-s.hoursAgo * 3600))
+        // The same made-up clock time on every render, from the session's ID.
+        let seed = Double(s.id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }) / 65_535
+        let earliest = 9 + hours, latest = 19.0
+        let minutes = Int(((earliest + (latest - earliest) * seed) * 60).rounded())
+        var end = calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: day) ?? day
+        if end > now.addingTimeInterval(-600) { end = calendar.date(byAdding: .day, value: -1, to: end) ?? end }
+        if now.timeIntervalSince(end) > 13.5 * 86_400 { end = calendar.date(byAdding: .day, value: 1, to: end) ?? end }
+        return end
+    }
+
     /// Writes `.claude/projects` the way Claude Code lays it out, and creates each project folder.
     static func write(home: URL, now: Date) {
         let fm = FileManager.default
@@ -68,13 +85,13 @@ enum Demo {
             let dir = projects.appendingPathComponent(ProjectDirs.name(for: folder), isDirectory: true)
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             // The lines spread over the hours its usage figures say it ran (DemoUsage.swift), ending
-            // `hoursAgo` before now.
+            // when `end(of:now:)` says.
             func count(_ turns: [Session.Turn]) -> Int {
                 turns.reduce(0) { n, t in if case .agent(_, let inner) = t { return n + 2 + count(inner) }; return n + 1 }
             }
             let total = count(s.turns)
             let step = (usageSpecs[s.id]?.hours ?? 0.1) * 3600 / Double(total)
-            var clock = now.addingTimeInterval(-s.hoursAgo * 3600 - Double(total) * step)
+            var clock = end(of: s, now: now).addingTimeInterval(-Double(total) * step)
             func records(_ turns: [Session.Turn], subagent: Bool) -> [String] {
                 var out: [String] = []
                 for t in turns {

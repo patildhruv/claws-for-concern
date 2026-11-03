@@ -133,8 +133,12 @@ extension UsageRow {
         return "\(UsageFormat.tokens(now)) of \(UsageFormat.tokens(w)) tokens (\(UsageFormat.percent(f)))" + (nearLimit ? ", near the limit" : "")
     }
 
-    var linesText: String {
-        "+\(linesAdded.formatted(.number)) −\(linesRemoved.formatted(.number))" + (linesEstimate ? " est." : "")
+    /// "+120 −8", "+120", "−8", "0"; a side that is zero is left out.
+    var linesText: String { UsageRow.lines(linesAdded, linesRemoved) + (linesEstimate ? " est." : "") }
+
+    static func lines(_ added: Int, _ removed: Int) -> String {
+        let parts = (added > 0 ? ["+" + added.formatted(.number)] : []) + (removed > 0 ? ["−" + removed.formatted(.number)] : [])
+        return parts.isEmpty ? "0" : parts.joined(separator: " ")
     }
 
     var lastActiveText: String {
@@ -191,8 +195,14 @@ struct UsageTiles: View {
     private func unpricedNote(_ t: UsageTotals) -> String? {
         let models = vm.report.unpriced.map(UsageFormat.model).joined(separator: ", ")
         var parts: [String] = []
-        if t.unknownSessions > 0 { parts.append("\(t.unknownSessions) session\(t.unknownSessions == 1 ? "" : "s") could not be priced and count as unknown, not $0") }
-        if t.partialSessions > 0 { parts.append("\(t.partialSessions) only in part (≥ in the table)") }
+        if t.unknownSessions > 0 {
+            parts.append(t.unknownSessions == 1 ? "1 session could not be priced; it counts as unknown, not $0"
+                         : "\(t.unknownSessions) sessions could not be priced; they count as unknown, not $0")
+        }
+        if t.partialSessions > 0 {
+            parts.append(t.partialSessions == 1 ? "1 session could be priced only in part (≥ in the table)"
+                         : "\(t.partialSessions) sessions could be priced only in part (≥ in the table)")
+        }
         guard !parts.isEmpty else { return nil }
         return "No API price for \(models): " + parts.joined(separator: "; ") + "."
     }
@@ -512,7 +522,10 @@ struct AllSessionsSection: View {
                     Text(r.title).lineLimit(1)
                     Text(r.folder).font(.caption).foregroundStyle(UsageStyle.secondaryText).lineLimit(1).truncationMode(.middle)
                 }
-                .help(r.title)
+                // Titles truncate in the column: the whole name and folder on hover.
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .help("\(r.title)\n\(r.folder)")
             }
             .width(min: 200, ideal: 250)
             TableColumn("Project", value: \UsageRow.projectName) { r in Text(r.projectName).lineLimit(1) }
@@ -602,8 +615,9 @@ struct ByProjectSection: View {
             }
             if projects.count > 6 {
                 let rest = projects.dropFirst(6)
-                Text("and \(rest.count) more: \(usage.money(rest.reduce(0) { $0 + $1.cost }))")
-                    .font(.caption).foregroundStyle(UsageStyle.secondaryText)
+                Text("+\(rest.count) more: \(usage.money(rest.reduce(0) { $0 + $1.cost }))")
+                    .foregroundStyle(UsageStyle.secondaryText)
+                    .help(rest.map(\.name).joined(separator: ", "))
             }
         }
         .usageCard()
@@ -640,8 +654,12 @@ struct ByModelSection: View {
                 .accessibilityElement()
                 .accessibilityLabel("Cost by model")
                 .accessibilityValue(big.map { "\($0.name) \(UsageFormat.percent($0.share))" }.joined(separator: ", "))
+                // The six that cost most, then the rest in one line; models with no price always show,
+                // so an unknown cost is never hidden.
+                let priced = models.filter { $0.cost != nil }
+                let rest = priced.dropFirst(Self.shown)
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(models) { m in
+                    ForEach(Array(priced.prefix(Self.shown)) + models.filter { $0.cost == nil }) { m in
                         Button { vm.filter.model = vm.filter.model == m.name ? nil : m.name } label: {
                             HStack(spacing: 8) {
                                 RoundedRectangle(cornerRadius: 2).fill(m.cost == nil ? UsageStyle.track : color(m.name)).frame(width: 10, height: 10)
@@ -653,6 +671,11 @@ struct ByModelSection: View {
                         .buttonStyle(.plain)
                         .help(vm.filter.model == m.name ? "Show every model again" : "Only sessions in which \(m.name) replied")
                     }
+                    if !rest.isEmpty {
+                        Text("+\(rest.count) more: \(usage.money(rest.reduce(0) { $0 + ($1.cost ?? 0) })) est.")
+                            .foregroundStyle(UsageStyle.secondaryText)
+                            .help(rest.map(\.name).joined(separator: ", "))
+                    }
                 }
                 Text("Each session's cost split by its models' share of its estimate.")
                     .font(.caption).foregroundStyle(UsageStyle.secondaryText)
@@ -660,6 +683,8 @@ struct ByModelSection: View {
         }
         .usageCard()
     }
+
+    static let shown = 6
 
     /// By the model's place in the all-time list, so a filter never repaints the others; under 1% grey.
     private func color(_ name: String) -> Color {

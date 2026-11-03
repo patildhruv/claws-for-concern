@@ -75,7 +75,8 @@ extension Demo {
         for (i, s) in sessions.enumerated() {
             guard let spec = usageSpecs[s.id] else { continue }
             let folder = home.appendingPathComponent(s.folder).path
-            out[s.id] = play(s, spec, folder: folder, end: now.addingTimeInterval(-s.hoursAgo * 3600),
+            // In working hours on its day, as its transcript (`Demo.end(of:now:)`).
+            out[s.id] = play(s, spec, folder: folder, end: end(of: s, now: now, calendar: calendar),
                              seed: UInt64(i + 1), calendar: calendar)
         }
         return out
