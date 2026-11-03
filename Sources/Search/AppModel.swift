@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
@@ -26,6 +27,10 @@ final class AppModel: ObservableObject {
     @Published var selection: String? {
         didSet { if selection != oldValue { loadExcerpts() } }
     }
+    /// The detail pane's Usage section open or folded away (remembered, except in the demo).
+    @Published var usageShown: Bool {
+        didSet { if !Demo.active { UserDefaults.standard.set(usageShown, forKey: "usageShown") } }
+    }
     @Published private(set) var hits: [Hit] = []
     @Published private(set) var snippets: [String: AttributedString] = [:]
     @Published private(set) var excerpts: [Excerpt] = []
@@ -50,12 +55,17 @@ final class AppModel: ObservableObject {
     /// The search the results on screen came from; Return waits until they match the field.
     private var shown: (generation: Int, query: String)?
     private var resumeFirstHit = false
+    /// Each session's cost and context, for the Cost and Context sorts (`setUsage`).
+    private var ranks: [String: UsageRank] = [:]
+    private weak var usage: UsageModel?
+    private var usageWatch: AnyCancellable?
 
     init(store: SessionStore = SessionStore()) {
         self.store = store
         let saved = Demo.active ? nil : UserDefaults.standard.object(forKey: "scope") as? Int
         scope = saved.map { Scope(rawValue: UInt8(truncatingIfNeeded: $0)) } ?? .standard
         sort = Demo.active ? .relevance : SortMode(rawValue: UserDefaults.standard.string(forKey: "sort") ?? "") ?? .relevance
+        usageShown = Demo.active ? true : UserDefaults.standard.object(forKey: "usageShown") as? Bool ?? true
         ResumeClient.shared.show = { [weak self] in self?.show(flash: $0) }
         // Made-up sessions: nothing to resume, and nothing is ever sent to Claws for Concern.
         if Demo.active { resumer = { [weak self] _ in self?.show(flash: "Demo sessions: there is nothing to resume.") } }
@@ -79,8 +89,26 @@ final class AppModel: ObservableObject {
 
     // MARK: Indexing
 
+    /// The usage figures this window shows: refreshed with the index, and the list re-sorted when they
+    /// change while it is sorted by cost or context.
+    func attach(_ usage: UsageModel) {
+        guard self.usage !== usage else { return }
+        self.usage = usage
+        // $bySession sends the current figures at once, then each change (before it is stored: use the value).
+        usageWatch = usage.$bySession.sink { [weak self] all in self?.setUsage(all) }
+    }
+
+    func setUsage(_ all: [String: SessionUsage]) {
+        let new = UsageRank.ranks(all)
+        guard new != ranks else { return }
+        ranks = new
+        if sort.usesFigures { runSearch(after: 0) }
+    }
+
     /// Re-reads changed transcripts and rebuilds the index if anything changed. Cheap when nothing did.
+    /// The usage figures are read again too.
     func refresh() {
+        usage?.refresh()
         if indexing { refreshQueued = true; return }
         indexing = true
         let store = store
@@ -117,12 +145,13 @@ final class AppModel: ObservableObject {
         let query = ParsedQuery(raw)
         let scope = scope
         let sort = sort
+        let ranks = ranks
         generation += 1
         let gen = generation
         searchTask = Task.detached(priority: .userInitiated) { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled,
-                  let out = index.search(query, scope: scope, sort: sort, cancelled: { Task.isCancelled }),
+                  let out = index.search(query, scope: scope, sort: sort, ranks: ranks, cancelled: { Task.isCancelled }),
                   !Task.isCancelled else { return }
             await self?.show(out, generation: gen, query: raw)
 

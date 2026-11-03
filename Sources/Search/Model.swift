@@ -11,7 +11,23 @@ struct Scope: OptionSet, Hashable {
     static let standard: Scope = [.prompts, .replies, .toolCalls, .subagents]
 }
 
-enum SortMode: String { case relevance, recent }
+/// The list's order. Cost and Context put the highest first and sessions without figures last
+/// (`UsageRank`); the raw value is what the Sort setting stores.
+enum SortMode: String, CaseIterable {
+    case relevance, recent, cost, context
+
+    var title: String {
+        switch self {
+        case .relevance: return "Relevance"
+        case .recent: return "Recent"
+        case .cost: return "Cost"
+        case .context: return "Context"
+        }
+    }
+
+    /// Sorted by a usage figure, so the order changes when the figures do.
+    var usesFigures: Bool { self == .cost || self == .context }
+}
 
 struct Message {
     enum Kind: UInt8 { case prompt, reply, toolCall }
