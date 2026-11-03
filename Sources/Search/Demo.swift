@@ -23,7 +23,9 @@ enum Demo {
         let dir = fm.temporaryDirectory.appendingPathComponent(prefix + "\(getpid())", isDirectory: true)
         try? fm.removeItem(at: dir)
         let home = dir.appendingPathComponent("home", isDirectory: true)
-        write(home: home, now: Date())
+        let now = Date()
+        write(home: home, now: now)
+        loadUsage(home: home, now: now)
         Paths.home = home.path
         root = dir
         active = true
@@ -34,6 +36,7 @@ enum Demo {
     static func deactivate() {
         guard active else { return }
         Paths.home = Paths.realHome
+        dropUsage()
         if let root { try? FileManager.default.removeItem(at: root) }
         root = nil
         active = false
@@ -64,11 +67,18 @@ enum Demo {
             try? fm.createDirectory(atPath: folder, withIntermediateDirectories: true)
             let dir = projects.appendingPathComponent(ProjectDirs.name(for: folder), isDirectory: true)
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            var clock = now.addingTimeInterval(-s.hoursAgo * 3600 - Double(s.turns.count) * 150)
+            // The lines spread over the hours its usage figures say it ran (DemoUsage.swift), ending
+            // `hoursAgo` before now.
+            func count(_ turns: [Session.Turn]) -> Int {
+                turns.reduce(0) { n, t in if case .agent(_, let inner) = t { return n + 2 + count(inner) }; return n + 1 }
+            }
+            let total = count(s.turns)
+            let step = (usageSpecs[s.id]?.hours ?? 0.1) * 3600 / Double(total)
+            var clock = now.addingTimeInterval(-s.hoursAgo * 3600 - Double(total) * step)
             func records(_ turns: [Session.Turn], subagent: Bool) -> [String] {
                 var out: [String] = []
                 for t in turns {
-                    clock = clock.addingTimeInterval(150)
+                    clock = clock.addingTimeInterval(step)
                     var base: [String: Any] = ["sessionId": s.id, "cwd": folder, "gitBranch": s.branch, "entrypoint": "cli",
                                                "version": "2.1.316", "timestamp": iso.string(from: clock), "isSidechain": subagent]
                     switch t {

@@ -11,6 +11,8 @@ enum Main {
         func done(_ code: Int32) -> Never { Demo.deactivate(); exit(code) }
         if args.contains("--search") { done(CLI.search(args)) }
         if args.contains("--resume") { done(CLI.resume(args)) }
+        if args.contains("--usage-dump") { done(UsageCLI.dump()) }
+        if args.contains("--usage") { done(UsageCLI.show(args)) }
         if args.contains("--snapshot") { done(MainActor.assumeIsolated { Snapshot.run(args) }) }
         ClawsSearchApp.main()
     }
