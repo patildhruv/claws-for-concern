@@ -87,7 +87,7 @@ and subagents, plus each session's name, folder and ID. ⌘, from there opens Se
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/search-dark.png">
-  <img src="docs/media/search-light.png" alt="The Search Sessions window: the query &quot;rate limit&quot; with five matching sessions on the left, highlighted in clay; on the right the selected session's folder, ID, branch and dates, a Resume button, its resume command, and the two messages that matched">
+  <img src="docs/media/search-light.png" alt="The Search Sessions window: the query &quot;rate limit&quot; with five matching sessions on the left, highlighted in clay, each with its context bar and cost; on the right the selected session's folder, ID, branch and dates, a Resume button, its resume command, and its usage: context now and over time, and its cost at API prices">
 </picture>
 
 - **Type words, a `"quoted phrase"`, a folder or an ID.** Words forgive a typo or an unfinished word;
@@ -126,9 +126,11 @@ session's usage and cost in one window.
 
 **What the figures mean.** Cost is at Anthropic's API prices: what the tokens would cost on the API. On a
 Pro or Max plan it is not your bill. It is Claude Code's own figure when the session's transcript has a
-current one; otherwise it is worked out from the session's tokens and marked **est.** A model with no
-known price makes the cost unknown, never $0. Lines changed are Claude Code's count, or counted from
-Claude's edits (est.). Context is how much of the model's window the conversation fills after its last reply.
+current one; otherwise it is worked out from the session's tokens and marked **est.**, as is Claude
+Code's figure split by day when a date range cuts a session. A model with no known price makes the cost
+**Unknown**, never $0, and a total that leaves some out reads "≥". Lines changed are Claude Code's count,
+or counted from Claude's edits (est.). Context is how much of the model's window the conversation fills
+after its last reply. Picking a model shows the sessions it replied in, with every model in them counted.
 
 **A second currency**, if you like: the **$** menu in the toolbar adds rupees (or euros, pounds, yen and a
 dozen more) next to every dollar amount, in Search too, at a rate fetched at most once a day. It stays off
@@ -257,11 +259,14 @@ and the session files the hooks write to see which sessions are running; it only
 
 The one exception is the second currency, and only once you turn it on. Then, at most once a day, Search
 asks [Frankfurter](https://frankfurter.dev) (a free, open-source exchange-rate service run from
-central-bank data) for the day's rates: a single HTTPS request to
+central-bank data) for the day's rates: a single HTTPS GET of
 `https://api.frankfurter.dev/v2/rates?base=USD&quotes=AED,AUD,BRL,CAD,CHF,CNY,EUR,GBP,HKD,INR,JPY,KRW,MXN,SEK,SGD,ZAR`
-with the headers `User-Agent: ClawsSearch`, `Accept: application/json` and `Accept-Language: en`, the
-same for everyone. It names every currency on offer, so it does not say which one you picked; nothing
-about you or your sessions is in it. As with any connection, the service sees your IP address; its
+with the headers `User-Agent: ClawsSearch`, `Accept: application/json` and `Accept-Language: en`, plus
+the standard ones macOS adds to every request: the host name, the compressions it accepts
+(`Accept-Encoding`) and, over HTTP/1.1, `Connection`. They are the same for everyone, with no cookies. The request names every
+currency on offer, so it does not say which one you picked; nothing about you or your sessions is in it.
+A redirect is refused rather than followed, so it never goes anywhere else; it gives up after 20 seconds,
+and an answer over 64 KB is not read. As with any connection, the service sees your IP address; its
 documentation says it does not log IP addresses or request URLs, and it runs behind Cloudflare. The
 answer is kept on your Mac with its date. Turned off, there is no request at all.
 
