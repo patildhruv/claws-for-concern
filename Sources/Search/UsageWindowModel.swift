@@ -149,11 +149,16 @@ final class UsageWindowModel: ObservableObject {
 
     var selectedSession: Session? { session(selection) }
 
-    /// Search's window with the session selected; `open` brings the window up.
+    /// Search's entry point: the copy filed under the figures' project folder. The self-test records it.
+    lazy var showInSearch: (String, String?) -> Void = { [weak self] id, projectDir in
+        self?.app?.show(sessionID: id, projectDir: projectDir)
+    }
+
+    /// Search's window with the session selected and in view; `open` brings the window up.
     func openInSearch(_ id: String, open: () -> Void) {
-        guard let app, sessions[id] != nil else { show("Search has not read this session yet."); return }
+        guard sessions[id] != nil else { show("Search has not read this session yet."); return }
         open()
-        app.showInSearch(id)
+        showInSearch(id, usage[id]?.projectDir)
     }
 
     /// The 1.3 path: through Search's model, which asks Claws for Concern (its answer shows below).

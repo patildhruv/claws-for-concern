@@ -348,8 +348,8 @@ enum UsageWindowTests {
 
     // MARK: Open in Search
 
-    /// Two made-up transcripts; the search field matches only one. Open in Search on the other clears
-    /// the field and selects it once its row is in the list. Then the demo: its live files stay in its home.
+    /// Two made-up transcripts; the search field matches only one, yet the window knows both, and Open in
+    /// Search hands Search the session and its project folder. Then the demo: its live files stay in its home.
     @MainActor
     static func reveal() -> [(String, Bool)] {
         let fm = FileManager.default
@@ -370,20 +370,29 @@ enum UsageWindowTests {
             let end = Date().addingTimeInterval(seconds)
             while !done() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
         }
-        wait(10) { !model.indexing && model.hits.count == 2 }
+        wait(10) { !model.indexing && model.indexedSessions.count == 2 }
         model.query = "zebra"
-        wait(5) { model.hits.count == 1 }
-        let narrowed = model.hits.map(\.id) == [ids[0]] && model.indexedSessions.count == 2
-        model.showInSearch(ids[1])
-        wait(5) { model.selection == ids[1] }
+        wait(2) { !model.indexing }
+        let known = model.indexedSessions.map(\.id).sorted() == ids
+        // The window's side: Search's entry point gets the ID and the project folder of its figures.
+        let vm = UsageWindowModel(filter: UsageFilter(range: .all), remember: nil)
+        var calls: [String] = []
+        var opened = 0
+        vm.showInSearch = { calls.append("\($0) \($1 ?? "-")") }
+        let dir = ProjectDirs.name(for: base.appendingPathComponent("p1").path)
+        var u = SessionUsage(sessionID: ids[1], projectDir: dir)
+        u.lastActive = Date()
+        vm.load(usage: [ids[1]: u], sessions: model.indexedSessions, live: [])
+        vm.openInSearch(ids[1]) { opened += 1 }
+        vm.openInSearch("2f1e2d3c-4b5a-6978-8a9b-acbdcedfe0ff") { opened += 1 }
         var out: [(String, Bool)] = [
-            ("open in Search: every indexed session is known, not only the hits", narrowed),
-            ("open in Search: the field is cleared and the session selected", model.query.isEmpty && model.selection == ids[1]),
+            ("open in Search: every indexed session is known, not only what the field matches", known),
+            ("open in Search: the window comes up and Search is asked for that copy of the session",
+             calls == ["\(ids[1]) \(dir)"] && opened == 1),
+            ("open in Search: a session Search has not read says so and opens nothing",
+             vm.flash == "Search has not read this session yet." && calls.count == 1),
+            ("table: named and placed from Search's index", vm.rows.first?.title == "a quiet afternoon" && vm.rows.first?.known == true),
         ]
-        model.showInSearch(ids[1])
-        let cleared = model.selection == nil
-        wait(5) { model.selection == ids[1] }
-        out.append(("open in Search: the same session again moves the selection, so the list scrolls to it", cleared && model.selection == ids[1]))
 
         let root = Demo.activate()
         let running = LiveSessions.running()
