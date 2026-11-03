@@ -32,13 +32,37 @@ enum SearchHelper {
     private static var nonces: [String: pid_t] = [:]
     private static var gate = ResumeGate()
 
+    /// Asks a running helper for a window (it only opens one): the window and the helper's PID, so
+    /// another copy of the helper ignores it. Anyone can post it; all it can do is open a window.
+    static let windowNote = Notification.Name(ResumeRequest.appID + ".search.openWindow")
+
     /// Opens the search window, or brings it forward. A new helper gets a fresh nonce on its command
     /// line; one already running keeps the nonce it was started with.
-    static func open() {
+    static func open() { show(window: "main") }
+
+    /// The Usage window, and only that: a new helper starts with `--window usage` (its first scene),
+    /// a running one is asked for it.
+    static func openUsage() { show(window: "usage") }
+
+    /// A new helper's command line: its nonce, and the window to bring up when it is not Search.
+    static func arguments(nonce: String, window: String) -> [String] {
+        window == "main" ? ["--nonce", nonce] : ["--nonce", nonce, "--window", window]
+    }
+
+    static func windowRequest(_ window: String, pid: pid_t) -> [String: Any] { ["window": window, "pid": Int(pid)] }
+
+    /// This bundle's own helper, while it runs (a copy elsewhere has the same bundle ID).
+    static func runningHelper() -> NSRunningApplication? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: ResumeRequest.appID + ".search")
+            .first { !$0.isTerminated && $0.bundleURL?.standardizedFileURL.path == url.standardizedFileURL.path }
+    }
+
+    private static func show(window: String) {
+        let already = runningHelper()
         let nonce = UUID().uuidString
         nonces[nonce] = 0
         let cfg = NSWorkspace.OpenConfiguration()
-        cfg.arguments = ["--nonce", nonce]
+        cfg.arguments = arguments(nonce: nonce, window: window)
         NSWorkspace.shared.openApplication(at: url, configuration: cfg) { app, error in
             DispatchQueue.main.async {
                 guard let pid = app?.processIdentifier else {
@@ -48,8 +72,17 @@ enum SearchHelper {
                     return
                 }
                 // Already running: it kept its own nonce, and this one never reached it.
-                let known = nonces.contains { $0.key != nonce && $0.value == pid }
+                let known = already?.processIdentifier == pid || nonces.contains { $0.key != nonce && $0.value == pid }
                 nonces[nonce] = known ? nil : pid
+                // It ignored the arguments (macOS only brought it forward): ask for the window. One still
+                // starting up may not listen yet, so it is asked again a moment later (opening is idempotent).
+                guard let already, already.processIdentifier == pid else { return }
+                let info = windowRequest(window, pid: pid)
+                func post() {
+                    DistributedNotificationCenter.default().postNotificationName(windowNote, object: nil, userInfo: info, deliverImmediately: true)
+                }
+                post()
+                if !already.isFinishedLaunching { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { post() } }
             }
         }
     }

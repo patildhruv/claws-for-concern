@@ -596,6 +596,18 @@ enum SelfTest {
         check("search: its Settings… posts the notification Claws listens for",
               AppDelegate.openSettingsNote.rawValue == "io.github.patildhruv.claws-for-concern.openSettings")
 
+        // Usage…: the crab menu item, what a new helper is started with, and what a running one is asked.
+        let items = StatusMenu.helperItems()
+        check("menu: Usage… right under Search Sessions…", items.map(\.title) == ["Search Sessions…", "Usage…"]
+              && items.map(\.keyEquivalent) == ["f", "u"] && items.allSatisfy(\.isEnabled), "\(items.map(\.title))")
+        check("usage: a new helper gets its nonce and --window usage, so only Usage comes up; Search the nonce alone",
+              SearchHelper.arguments(nonce: "n1", window: "usage") == ["--nonce", "n1", "--window", "usage"]
+              && SearchHelper.arguments(nonce: "n1", window: "main") == ["--nonce", "n1"])
+        let ask = SearchHelper.windowRequest("usage", pid: 42)
+        check("usage: a running helper is asked by window and PID, on the notification the helper listens for",
+              SearchHelper.windowNote.rawValue == "io.github.patildhruv.claws-for-concern.search.openWindow"
+              && ask["window"] as? String == "usage" && ask["pid"] as? Int == 42 && ask.count == 2)
+
         let id = "0f1e2d3c-4b5a-6978-8a9b-acbdcedfe0f1"
         let now = Date().timeIntervalSince1970
         let r = ResumeRequest(sessionId: id, folder: "/Users/someone/code", nonce: "n1", sent: now)

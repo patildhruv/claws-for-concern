@@ -169,7 +169,7 @@ enum Frankfurter {
     }
 
     /// One GET, no cookies, no cache on disk, our own short user agent.
-    static func fetch(_ codes: [String]) async throws -> [String: RateTable.Rate] {
+    @Sendable static func fetch(_ codes: [String]) async throws -> [String: RateTable.Rate] {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         config.httpAdditionalHeaders = ["User-Agent": "ClawsSearch", "Accept": "application/json"]
